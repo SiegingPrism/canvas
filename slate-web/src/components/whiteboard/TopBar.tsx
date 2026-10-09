@@ -32,6 +32,7 @@ import {
   MonitorPlay,
   Compass,
   LayoutGrid,
+  Cloud,
 } from "lucide-react";
 import { Link } from "@tanstack/react-router";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -86,6 +87,7 @@ export function TopBar({
     addObject,
     pushHistory,
     setAllTapeReveal,
+    syncWithCloud,
   } = useWhiteboard();
 
   const fileRef = useRef<HTMLInputElement>(null);
@@ -607,13 +609,15 @@ export function TopBar({
           </button>
           <button
             className="flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-xs font-medium hover:bg-accent text-foreground transition"
-            onClick={() => {
+            onClick={async () => {
               setMenuOpen(false);
-              shareQR();
+              toast.info("Syncing whiteboard with Supabase cloud...");
+              await syncWithCloud();
+              toast.success("Whiteboard synced with Supabase cloud");
             }}
           >
-            <QrCode className="h-3.5 w-3.5 text-muted-foreground" />
-            <span>Share via QR</span>
+            <Cloud className="h-3.5 w-3.5 text-blue-500" />
+            <span>Sync with Cloud</span>
           </button>
         </PopoverContent>
       </Popover>

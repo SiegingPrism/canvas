@@ -1,4 +1,9 @@
 import { create } from "zustand";
+import {
+  syncNoteToSupabase,
+  fetchNotesFromSupabase,
+  deleteNoteFromSupabase,
+} from "./supabase/dbService";
 
 export type NoteType = "standard" | "quick" | "lecture" | "research" | "code" | "meeting";
 
@@ -46,6 +51,15 @@ function createEmptyBlock(type: NoteBlock["type"] = "text"): NoteBlock {
   };
 }
 
+let noteSyncTimer: ReturnType<typeof setTimeout> | null = null;
+function triggerNoteCloudSync(note: Note) {
+  if (typeof window === "undefined") return;
+  if (noteSyncTimer) clearTimeout(noteSyncTimer);
+  noteSyncTimer = setTimeout(() => {
+    syncNoteToSupabase(note).catch(() => {});
+  }, 1000);
+}
+
 type NotesState = {
   notes: Record<string, Note>;
   noteOrder: string[];
@@ -68,6 +82,7 @@ type NotesActions = {
   updateBlock: (noteId: string, blockId: string, patch: Partial<NoteBlock>) => void;
   deleteBlock: (noteId: string, blockId: string) => void;
   moveBlock: (noteId: string, fromIndex: number, toIndex: number) => void;
+  syncWithCloud: () => Promise<void>;
 };
 
 function loadStorage(): { notes: Record<string, Note>; noteOrder: string[] } {
@@ -124,6 +139,7 @@ export const useNotes = create<NotesState & NotesActions>((set, get) => {
       const noteOrder = [id, ...get().noteOrder];
       saveStorage(notes, noteOrder);
       set({ notes, noteOrder });
+      triggerNoteCloudSync(note);
       return id;
     },
 
@@ -132,6 +148,7 @@ export const useNotes = create<NotesState & NotesActions>((set, get) => {
       const noteOrder = get().noteOrder.filter((nid) => nid !== id);
       saveStorage(notes, noteOrder);
       set({ notes, noteOrder });
+      deleteNoteFromSupabase(id).catch(() => {});
     },
 
     duplicateNote: (id) => {
@@ -152,61 +169,74 @@ export const useNotes = create<NotesState & NotesActions>((set, get) => {
       const noteOrder = [newId, ...get().noteOrder];
       saveStorage(notes, noteOrder);
       set({ notes, noteOrder });
+      triggerNoteCloudSync(clone);
       return newId;
     },
 
     renameNote: (id, title) => {
       const note = get().notes[id];
       if (!note) return;
-      const notes = { ...get().notes, [id]: { ...note, title, updatedAt: Date.now() } };
+      const updated = { ...note, title, updatedAt: Date.now() };
+      const notes = { ...get().notes, [id]: updated };
       saveStorage(notes, get().noteOrder);
       set({ notes });
+      triggerNoteCloudSync(updated);
     },
 
     setNoteType: (id, type) => {
       const note = get().notes[id];
       if (!note) return;
-      const notes = { ...get().notes, [id]: { ...note, type, updatedAt: Date.now() } };
+      const updated = { ...note, type, updatedAt: Date.now() };
+      const notes = { ...get().notes, [id]: updated };
       saveStorage(notes, get().noteOrder);
       set({ notes });
+      triggerNoteCloudSync(updated);
     },
 
     setNoteTags: (id, tags) => {
       const note = get().notes[id];
       if (!note) return;
-      const notes = { ...get().notes, [id]: { ...note, tags, updatedAt: Date.now() } };
+      const updated = { ...note, tags, updatedAt: Date.now() };
+      const notes = { ...get().notes, [id]: updated };
       saveStorage(notes, get().noteOrder);
       set({ notes });
+      triggerNoteCloudSync(updated);
     },
 
     toggleFavorite: (id) => {
       const note = get().notes[id];
       if (!note) return;
+      const updated = { ...note, favorite: !note.favorite, updatedAt: Date.now() };
       const notes = {
         ...get().notes,
-        [id]: { ...note, favorite: !note.favorite, updatedAt: Date.now() },
+        [id]: updated,
       };
       saveStorage(notes, get().noteOrder);
       set({ notes });
+      triggerNoteCloudSync(updated);
     },
 
     toggleArchive: (id) => {
       const note = get().notes[id];
       if (!note) return;
+      const updated = { ...note, archived: !note.archived, updatedAt: Date.now() };
       const notes = {
         ...get().notes,
-        [id]: { ...note, archived: !note.archived, updatedAt: Date.now() },
+        [id]: updated,
       };
       saveStorage(notes, get().noteOrder);
       set({ notes });
+      triggerNoteCloudSync(updated);
     },
 
     setNoteBoardId: (id, boardId) => {
       const note = get().notes[id];
       if (!note) return;
-      const notes = { ...get().notes, [id]: { ...note, boardId, updatedAt: Date.now() } };
+      const updated = { ...note, boardId, updatedAt: Date.now() };
+      const notes = { ...get().notes, [id]: updated };
       saveStorage(notes, get().noteOrder);
       set({ notes });
+      triggerNoteCloudSync(updated);
     },
 
     addNoteTag: (id, tag) => {
@@ -215,18 +245,22 @@ export const useNotes = create<NotesState & NotesActions>((set, get) => {
       const cleanTag = tag.trim().replace(/^#/, "");
       if (!cleanTag || note.tags.includes(cleanTag)) return;
       const tags = [...note.tags, cleanTag];
-      const notes = { ...get().notes, [id]: { ...note, tags, updatedAt: Date.now() } };
+      const updated = { ...note, tags, updatedAt: Date.now() };
+      const notes = { ...get().notes, [id]: updated };
       saveStorage(notes, get().noteOrder);
       set({ notes });
+      triggerNoteCloudSync(updated);
     },
 
     removeNoteTag: (id, tag) => {
       const note = get().notes[id];
       if (!note) return;
       const tags = note.tags.filter((t) => t !== tag);
-      const notes = { ...get().notes, [id]: { ...note, tags, updatedAt: Date.now() } };
+      const updated = { ...note, tags, updatedAt: Date.now() };
+      const notes = { ...get().notes, [id]: updated };
       saveStorage(notes, get().noteOrder);
       set({ notes });
+      triggerNoteCloudSync(updated);
     },
 
     addBlock: (noteId, type = "text", afterId, content = "") => {
@@ -244,9 +278,11 @@ export const useNotes = create<NotesState & NotesActions>((set, get) => {
       } else {
         blocks = [...note.blocks, newBlock];
       }
-      const notes = { ...get().notes, [noteId]: { ...note, blocks, updatedAt: Date.now() } };
+      const updated = { ...note, blocks, updatedAt: Date.now() };
+      const notes = { ...get().notes, [noteId]: updated };
       saveStorage(notes, get().noteOrder);
       set({ notes });
+      triggerNoteCloudSync(updated);
       return newBlock.id;
     },
 
@@ -254,18 +290,22 @@ export const useNotes = create<NotesState & NotesActions>((set, get) => {
       const note = get().notes[noteId];
       if (!note) return;
       const blocks = note.blocks.map((b) => (b.id === blockId ? { ...b, ...patch } : b));
-      const notes = { ...get().notes, [noteId]: { ...note, blocks, updatedAt: Date.now() } };
+      const updated = { ...note, blocks, updatedAt: Date.now() };
+      const notes = { ...get().notes, [noteId]: updated };
       saveStorage(notes, get().noteOrder);
       set({ notes });
+      triggerNoteCloudSync(updated);
     },
 
     deleteBlock: (noteId, blockId) => {
       const note = get().notes[noteId];
       if (!note || note.blocks.length <= 1) return;
       const blocks = note.blocks.filter((b) => b.id !== blockId);
-      const notes = { ...get().notes, [noteId]: { ...note, blocks, updatedAt: Date.now() } };
+      const updated = { ...note, blocks, updatedAt: Date.now() };
+      const notes = { ...get().notes, [noteId]: updated };
       saveStorage(notes, get().noteOrder);
       set({ notes });
+      triggerNoteCloudSync(updated);
     },
 
     moveBlock: (noteId, fromIndex, toIndex) => {
@@ -281,9 +321,49 @@ export const useNotes = create<NotesState & NotesActions>((set, get) => {
       const blocks = [...note.blocks];
       const [item] = blocks.splice(fromIndex, 1);
       blocks.splice(toIndex, 0, item);
-      const notes = { ...get().notes, [noteId]: { ...note, blocks, updatedAt: Date.now() } };
+      const updated = { ...note, blocks, updatedAt: Date.now() };
+      const notes = { ...get().notes, [noteId]: updated };
       saveStorage(notes, get().noteOrder);
       set({ notes });
+      triggerNoteCloudSync(updated);
+    },
+
+    syncWithCloud: async () => {
+      try {
+        const cloudNotes = await fetchNotesFromSupabase();
+        if (!cloudNotes || !cloudNotes.length) return;
+        const s = get();
+        const mergedNotes = { ...s.notes };
+        const mergedNoteOrder = [...s.noteOrder];
+
+        for (const cn of cloudNotes) {
+          const localNote = mergedNotes[cn.id];
+          if (!localNote || (cn.updated_at && new Date(cn.updated_at).getTime() > localNote.updatedAt)) {
+            const updatedAt = cn.updated_at ? new Date(cn.updated_at).getTime() : Date.now();
+            const createdAt = cn.created_at ? new Date(cn.created_at).getTime() : Date.now();
+            const blocks = Array.isArray(cn.blocks) && cn.blocks.length ? cn.blocks : [createEmptyBlock("text")];
+            mergedNotes[cn.id] = {
+              id: cn.id,
+              title: cn.title || "",
+              type: "standard",
+              tags: [],
+              blocks,
+              boardId: null,
+              favorite: false,
+              archived: false,
+              createdAt,
+              updatedAt,
+            };
+            if (!mergedNoteOrder.includes(cn.id)) {
+              mergedNoteOrder.push(cn.id);
+            }
+          }
+        }
+        saveStorage(mergedNotes, mergedNoteOrder);
+        set({ notes: mergedNotes, noteOrder: mergedNoteOrder });
+      } catch (err) {
+        console.warn("[Notes] Cloud sync failed:", err);
+      }
     },
   };
 });
@@ -292,5 +372,6 @@ if (typeof window !== "undefined") {
   queueMicrotask(() => {
     const loaded = loadStorage();
     useNotes.setState({ ...loaded, hydrated: true });
+    useNotes.getState().syncWithCloud().catch(() => {});
   });
 }

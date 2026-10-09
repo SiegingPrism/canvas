@@ -1,6 +1,11 @@
 import { create } from "zustand";
 import type { CanvasObject, Page, ToolId, WhiteboardState } from "./types";
 import { pagesForTemplate, type TemplateKey } from "./templates";
+import {
+  syncBoardToSupabase,
+  fetchBoardsFromSupabase,
+  deleteBoardFromSupabase,
+} from "../supabase/dbService";
 
 const STORAGE_KEY = "whiteboard.multi.v1";
 const LEGACY_KEY = "whiteboard.v1";
@@ -149,9 +154,20 @@ type Actions = {
   // AI history
   addRecentAI: (item: Omit<RecentAI, "id" | "createdAt">) => void;
   clearRecentAI: () => void;
+  // Supabase Cloud Sync
+  syncWithCloud: () => Promise<void>;
 };
 
 type State = WhiteboardState & PersistShape & { activeBoardId: string | null; hydrated: boolean };
+
+let cloudSyncTimer: ReturnType<typeof setTimeout> | null = null;
+function triggerCloudSync(meta: BoardMeta, pages: Page[]) {
+  if (typeof window === "undefined") return;
+  if (cloudSyncTimer) clearTimeout(cloudSyncTimer);
+  cloudSyncTimer = setTimeout(() => {
+    syncBoardToSupabase(meta, pages).catch(() => {});
+  }, 1200);
+}
 
 function syncActive(state: State): State {
   if (!state.activeBoardId) return state;
@@ -171,6 +187,9 @@ function syncActive(state: State): State {
     folders: next.folders,
     recentAI: next.recentAI,
   });
+  if (boards[state.activeBoardId]) {
+    triggerCloudSync(boards[state.activeBoardId], state.pages);
+  }
   return next;
 }
 
@@ -520,6 +539,7 @@ export const useWhiteboard = create<State & Actions>((set, get) => {
       const next: State = { ...s, boards, boardOrder, boardData };
       persistMeta(next);
       set(next);
+      triggerCloudSync(meta, pages);
       return id;
     },
     openBoard: (id) => {
@@ -571,6 +591,7 @@ export const useWhiteboard = create<State & Actions>((set, get) => {
       const next: State = { ...s, boards, boardData, boardOrder, activeBoardId };
       persistMeta(next);
       set(next);
+      deleteBoardFromSupabase(id).catch(() => {});
     },
     duplicateBoard: (id) => {
       const s = get();
@@ -594,6 +615,7 @@ export const useWhiteboard = create<State & Actions>((set, get) => {
       const next = { ...s, boards, boardOrder, boardData };
       persistMeta(next);
       set(next);
+      triggerCloudSync(meta, clone.pages);
       return newId;
     },
     toggleFavorite: (id) => {
@@ -603,6 +625,7 @@ export const useWhiteboard = create<State & Actions>((set, get) => {
       const next = { ...s, boards };
       persistMeta(next);
       set(next);
+      triggerCloudSync(boards[id], s.boardData[id]?.pages || []);
     },
     toggleArchive: (id) => {
       const s = get();
@@ -611,6 +634,7 @@ export const useWhiteboard = create<State & Actions>((set, get) => {
       const next = { ...s, boards };
       persistMeta(next);
       set(next);
+      triggerCloudSync(boards[id], s.boardData[id]?.pages || []);
     },
     setBoardTags: (id, tags) => {
       const s = get();
@@ -619,6 +643,7 @@ export const useWhiteboard = create<State & Actions>((set, get) => {
       const next = { ...s, boards };
       persistMeta(next);
       set(next);
+      triggerCloudSync(boards[id], s.boardData[id]?.pages || []);
     },
     setBoardFolder: (id, folderId) => {
       const s = get();
@@ -627,6 +652,7 @@ export const useWhiteboard = create<State & Actions>((set, get) => {
       const next = { ...s, boards };
       persistMeta(next);
       set(next);
+      triggerCloudSync(boards[id], s.boardData[id]?.pages || []);
     },
 
     createFolder: (name) => {
@@ -671,6 +697,54 @@ export const useWhiteboard = create<State & Actions>((set, get) => {
       persistMeta(next);
       set(next);
     },
+
+    syncWithCloud: async () => {
+      try {
+        const cloudBoards = await fetchBoardsFromSupabase();
+        if (!cloudBoards || !cloudBoards.length) return;
+        const s = get();
+        const mergedBoards = { ...s.boards };
+        const mergedBoardData = { ...s.boardData };
+        const mergedBoardOrder = [...s.boardOrder];
+
+        for (const cb of cloudBoards) {
+          const localMeta = mergedBoards[cb.id];
+          if (!localMeta || (cb.updated_at && new Date(cb.updated_at).getTime() > localMeta.updatedAt)) {
+            const updatedAt = cb.updated_at ? new Date(cb.updated_at).getTime() : nowMs();
+            const createdAt = cb.created_at ? new Date(cb.created_at).getTime() : nowMs();
+            mergedBoards[cb.id] = {
+              id: cb.id,
+              title: cb.title || "Untitled board",
+              tags: [],
+              folderId: cb.folder_id || null,
+              favorite: Boolean(cb.is_starred),
+              archived: false,
+              createdAt,
+              updatedAt,
+            };
+            const pages = Array.isArray(cb.pages) && cb.pages.length ? cb.pages : [emptyPage()];
+            mergedBoardData[cb.id] = {
+              pages,
+              activePageId: pages[0]?.id || uid(),
+            };
+            if (!mergedBoardOrder.includes(cb.id)) {
+              mergedBoardOrder.push(cb.id);
+            }
+          }
+        }
+
+        const next: State = {
+          ...s,
+          boards: mergedBoards,
+          boardData: mergedBoardData,
+          boardOrder: mergedBoardOrder,
+        };
+        persistMeta(next);
+        set(next);
+      } catch (err) {
+        console.warn("[Whiteboard] Cloud sync failed:", err);
+      }
+    },
   };
 });
 
@@ -684,5 +758,6 @@ if (typeof window !== "undefined") {
       activeBoardId: prev.activeBoardId || null,
       pages: prev.activeBoardId && prev.pages.length ? prev.pages : prev.pages || [emptyPage()],
     }));
+    useWhiteboard.getState().syncWithCloud().catch(() => {});
   }, 0);
 }

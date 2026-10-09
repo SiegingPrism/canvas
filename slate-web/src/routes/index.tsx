@@ -23,7 +23,9 @@ import {
   Search,
   Check,
   Tag,
+  Cloud,
 } from "lucide-react";
+import { toast } from "sonner";
 import { FeatureTourDialog } from "@/components/whiteboard/FeatureTourDialog";
 
 export const Route = createFileRoute("/")({
@@ -58,6 +60,7 @@ function Dashboard() {
     toggleFavorite,
     setBoardFolder,
     createFolder,
+    syncWithCloud,
   } = useWhiteboard();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [tourOpen, setTourOpen] = useState(false);
@@ -160,6 +163,19 @@ function Dashboard() {
             >
               <BookOpen className="h-4 w-4" />
               <span>Tutorial</span>
+            </button>
+            <button
+              type="button"
+              onClick={async () => {
+                toast.info("Syncing boards & notes with Supabase cloud...");
+                await syncWithCloud();
+                toast.success("Cloud database sync complete!");
+              }}
+              className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-sm font-medium text-muted-foreground hover:text-foreground hover:bg-accent transition"
+              title="Sync with Supabase Cloud Database"
+            >
+              <Cloud className="h-4 w-4 text-emerald-500" />
+              <span className="hidden lg:inline text-xs">Cloud Sync</span>
             </button>
             <Button size="sm" onClick={() => openNew()} className="ml-1">
               <Plus className="h-4 w-4" /> New board
