@@ -13,3 +13,22 @@
 .externalNativeBuild
 .cxx
 local.properties
+
+# Decompiled & Staged APK Artifacts
+*.apk
+*.apk.bak
+*.apk.idsig
+classes*.dex
+DebugProbesKt.bin
+resources.arsc
+apk_staging/
+temp_apk_res/
+/META-INF/
+/org/
+/kotlin/
+/res/
+/AndroidManifest.xml
+/new_index.html
+/rendered_index.html
+/web/
+.vscode/

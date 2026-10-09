@@ -1,0 +1,11 @@
+{
+	"appId": "com.slate.whiteboard",
+	"appName": "Slate",
+	"webDir": "dist/client",
+	"ios": {
+		"contentInset": "automatic"
+	},
+	"android": {
+		"allowMixedContent": false
+	}
+}
