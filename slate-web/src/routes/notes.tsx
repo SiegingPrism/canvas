@@ -17,7 +17,9 @@ import {
   Trash2,
   MoreVertical,
   Sparkles,
+  Cloud,
 } from "lucide-react";
+import { toast } from "sonner";
 import { semanticSearch } from "@/lib/ai/localRAG";
 
 export const Route = createFileRoute("/notes")({
@@ -52,6 +54,7 @@ function NotesPage() {
     toggleFavorite,
     toggleArchive,
     setNoteTags,
+    syncWithCloud,
   } = useNotes();
 
   const [search, setSearch] = useState("");
@@ -118,9 +121,24 @@ function NotesPage() {
               <FileText className="h-4 w-4 text-primary" /> Notes
             </h1>
           </div>
-          <Button size="sm" onClick={handleNewNote}>
-            <Plus className="h-4 w-4" /> New note
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={async () => {
+                toast.info("Syncing notes with Supabase cloud...");
+                await syncWithCloud();
+                toast.success("Notes synced with cloud database!");
+              }}
+              className="gap-1.5"
+            >
+              <Cloud className="h-4 w-4 text-emerald-500" />
+              <span>Cloud Sync</span>
+            </Button>
+            <Button size="sm" onClick={handleNewNote}>
+              <Plus className="h-4 w-4" /> New note
+            </Button>
+          </div>
         </div>
       </header>
 

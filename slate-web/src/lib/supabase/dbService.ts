@@ -83,6 +83,22 @@ export async function fetchBoardsFromSupabase(): Promise<CloudBoardRecord[]> {
   }
 }
 
+export async function fetchBoardById(boardId: string): Promise<CloudBoardRecord | null> {
+  const supabase = getSupabase();
+  if (!supabase) return null;
+  try {
+    const { data, error } = await supabase
+      .from("boards")
+      .select("*")
+      .eq("id", boardId)
+      .maybeSingle();
+    if (error || !data) return null;
+    return data as CloudBoardRecord;
+  } catch {
+    return null;
+  }
+}
+
 export async function deleteBoardFromSupabase(boardId: string): Promise<boolean> {
   const supabase = getSupabase();
   if (!supabase) return false;
@@ -152,6 +168,22 @@ export async function fetchNotesFromSupabase(): Promise<CloudNoteRecord[]> {
   } catch (err) {
     console.warn("Supabase fetchNotes failed:", err);
     return [];
+  }
+}
+
+export async function fetchNoteById(noteId: string): Promise<CloudNoteRecord | null> {
+  const supabase = getSupabase();
+  if (!supabase) return null;
+  try {
+    const { data, error } = await supabase
+      .from("notes")
+      .select("*")
+      .eq("id", noteId)
+      .maybeSingle();
+    if (error || !data) return null;
+    return data as CloudNoteRecord;
+  } catch {
+    return null;
   }
 }
 

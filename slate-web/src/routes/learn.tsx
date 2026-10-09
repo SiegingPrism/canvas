@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useWhiteboard } from "@/lib/whiteboard/store";
 import { useLearn, isCardDue, calculateStreak, type CardRating } from "@/lib/learnStore";
 import { useNotes } from "@/lib/notesStore";
+import { AIEngine } from "@/lib/ai/aiEngine";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -335,54 +336,90 @@ function LearningHubPage() {
   }
 
   // Generate Study Plan
-  function handleGenerateStudyPlan() {
+  async function handleGenerateStudyPlan() {
     if (!plannerGoal.trim()) {
       toast.error("Please enter a subject or study goal");
       return;
     }
     setIsGeneratingPlan(true);
-    setTimeout(() => {
-      const days = parseInt(plannerDays, 10) || 14;
-      const hours = plannerHours || "2";
-      const goal = plannerGoal.trim();
+    const days = parseInt(plannerDays, 10) || 14;
+    const hours = plannerHours || "2";
+    const goal = plannerGoal.trim();
 
-      const phase1Days = Math.max(2, Math.round(days * 0.35));
-      const phase2Days = Math.max(2, Math.round(days * 0.4));
-      const phase3Days = Math.max(1, days - phase1Days - phase2Days);
+    try {
+      const prompt = `You are an expert curriculum and active recall study planner.
+Create a structured study plan for: "${goal}".
+Duration: ${days} days, studying ${hours} hours daily.
+Return valid JSON only in this exact structure:
+{
+  "title": "${goal} Study Roadmap",
+  "dailyRoutine": "${hours}h daily: 45m Focused Study + 10m Spaced Recall + 45m Practice Problems + 20m Review.",
+  "phases": [
+    {
+      "title": "Phase 1: Concept Foundations (Days 1–${Math.max(2, Math.round(days * 0.35))})",
+      "tasks": ["Task 1...", "Task 2...", "Task 3..."]
+    },
+    {
+      "title": "Phase 2: Active Recall & Problem Drills (Days ${Math.max(2, Math.round(days * 0.35)) + 1}–${Math.max(4, Math.round(days * 0.75))})",
+      "tasks": ["Task 1...", "Task 2...", "Task 3..."]
+    },
+    {
+      "title": "Phase 3: Mock Testing & Synthesis (Days ${Math.max(4, Math.round(days * 0.75)) + 1}–${days})",
+      "tasks": ["Task 1...", "Task 2...", "Task 3..."]
+    }
+  ]
+}
+Output valid JSON only.`;
 
-      setGeneratedPlan({
-        title: `${goal} Master Plan`,
-        phases: [
-          {
-            title: `Phase 1: Concept Mastery (Days 1–${phase1Days})`,
-            tasks: [
-              `Deconstruct core syllabus and map fundamental principles`,
-              `Create visual whiteboard mind maps and Feynman summaries`,
-              `Extract high-yield definitions into spaced-repetition flashcards`,
-            ],
-          },
-          {
-            title: `Phase 2: Active Recall & Problem Sets (Days ${phase1Days + 1}–${phase1Days + phase2Days})`,
-            tasks: [
-              `Daily flashcard interval drills (${hours}h daily focus)`,
-              `Solve practice quizzes under timed exam conditions`,
-              `Identify lapse topics and refine Cornell cue notes`,
-            ],
-          },
-          {
-            title: `Phase 3: Mock Testing & Final Polish (Days ${phase1Days + phase2Days + 1}–${days})`,
-            tasks: [
-              `Full-length mock exam with error journal analysis`,
-              `Targeted review of lowest-scoring concepts`,
-              `Final memory consolidation and formula sheet recap`,
-            ],
-          },
-        ],
-        dailyRoutine: `${hours} hours daily: 45m Focused Study + 10m Spaced Recall + 45m Practice Problems + 20m Review.`,
-      });
-      setIsGeneratingPlan(false);
-      toast.success("Study plan generated!");
-    }, 400);
+      const aiText = await AIEngine.askAssistant(prompt);
+      const jsonMatch = aiText?.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]);
+        if (parsed.title && Array.isArray(parsed.phases)) {
+          setGeneratedPlan(parsed);
+          setIsGeneratingPlan(false);
+          toast.success("AI Study plan generated!");
+          return;
+        }
+      }
+    } catch {
+      // Fallback to local heuristic
+    }
+
+    const phase1Days = Math.max(2, Math.round(days * 0.35));
+    const phase2Days = Math.max(2, Math.round(days * 0.4));
+    setGeneratedPlan({
+      title: `${goal} Master Plan`,
+      phases: [
+        {
+          title: `Phase 1: Concept Mastery (Days 1–${phase1Days})`,
+          tasks: [
+            `Deconstruct core syllabus and map fundamental principles`,
+            `Create visual whiteboard mind maps and Feynman summaries`,
+            `Extract high-yield definitions into spaced-repetition flashcards`,
+          ],
+        },
+        {
+          title: `Phase 2: Active Recall & Problem Sets (Days ${phase1Days + 1}–${phase1Days + phase2Days})`,
+          tasks: [
+            `Daily flashcard interval drills (${hours}h daily focus)`,
+            `Solve practice quizzes under timed exam conditions`,
+            `Identify lapse topics and refine Cornell cue notes`,
+          ],
+        },
+        {
+          title: `Phase 3: Mock Testing & Final Polish (Days ${phase1Days + phase2Days + 1}–${days})`,
+          tasks: [
+            `Full-length mock exam with error journal analysis`,
+            `Targeted review of lowest-scoring concepts`,
+            `Final memory consolidation and formula sheet recap`,
+          ],
+        },
+      ],
+      dailyRoutine: `${hours} hours daily: 45m Focused Study + 10m Spaced Recall + 45m Practice Problems + 20m Review.`,
+    });
+    setIsGeneratingPlan(false);
+    toast.success("Study plan generated!");
   }
 
   function handleSavePlanToNotes() {
@@ -392,9 +429,14 @@ function LearningHubPage() {
       type: "standard",
     });
 
-    addBlock(noteId, "h2");
-    addBlock(noteId, "callout");
-    addBlock(noteId, "text");
+    addBlock(noteId, "h2", undefined, "Daily Routine & Strategy");
+    addBlock(noteId, "callout", undefined, generatedPlan.dailyRoutine);
+    for (const phase of generatedPlan.phases) {
+      addBlock(noteId, "h3", undefined, phase.title);
+      for (const task of phase.tasks) {
+        addBlock(noteId, "checklist", undefined, task);
+      }
+    }
 
     toast.success("Study plan saved to Notes!", {
       action: {

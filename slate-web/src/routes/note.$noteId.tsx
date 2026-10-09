@@ -1,6 +1,7 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useEffect, useRef, useState, useMemo } from "react";
 import { useNotes, NOTE_TYPE_LABELS, type NoteType, type NoteBlock } from "@/lib/notesStore";
+import { fetchNoteById } from "@/lib/supabase/dbService";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -106,10 +107,35 @@ export function NoteEditorPage() {
   // Handle store hydration and non-existent note
   useEffect(() => {
     if (hydrated && !note) {
-      toast.error("Note not found");
-      navigate({ to: "/notes" });
+      fetchNoteById(noteId).then((cn) => {
+        if (cn) {
+          const blocks = Array.isArray(cn.blocks) && cn.blocks.length
+            ? cn.blocks
+            : [{ id: uid(), type: "text" as const, content: cn.content || "" }];
+          const loadedNote = {
+            id: cn.id,
+            title: cn.title || "Untitled Note",
+            type: "standard" as const,
+            tags: [],
+            blocks,
+            boardId: null,
+            favorite: false,
+            archived: false,
+            createdAt: cn.created_at ? new Date(cn.created_at).getTime() : Date.now(),
+            updatedAt: cn.updated_at ? new Date(cn.updated_at).getTime() : Date.now(),
+          };
+          useNotes.setState((prev) => ({
+            ...prev,
+            notes: { ...prev.notes, [cn.id]: loadedNote },
+            noteOrder: prev.noteOrder.includes(cn.id) ? prev.noteOrder : [cn.id, ...prev.noteOrder],
+          }));
+        } else {
+          toast.error("Note not found");
+          navigate({ to: "/notes" });
+        }
+      });
     }
-  }, [hydrated, note, navigate]);
+  }, [hydrated, note, noteId, navigate]);
 
   function focusBlock(blockId: string) {
     setTimeout(() => {

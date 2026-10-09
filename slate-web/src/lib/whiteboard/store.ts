@@ -366,6 +366,9 @@ export const useWhiteboard = create<State & Actions>((set, get) => {
       };
       persistMeta(next);
       set(next);
+      if (boards[boardId]) {
+        triggerCloudSync(boards[boardId], pages);
+      }
     },
     updateObject: (id, patch) => {
       const s = get();

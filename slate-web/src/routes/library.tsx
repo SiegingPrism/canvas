@@ -32,7 +32,9 @@ import {
   Pencil,
   ArrowUpDown,
   Sparkles,
+  Cloud,
 } from "lucide-react";
+import { toast } from "sonner";
 import { semanticSearch } from "@/lib/ai/localRAG";
 
 export const Route = createFileRoute("/library")({
@@ -66,6 +68,7 @@ function Library() {
     createFolder,
     deleteFolder,
     renameFolder,
+    syncWithCloud,
   } = useWhiteboard();
 
   const [view, setView] = useState<View>("grid");
@@ -150,9 +153,24 @@ function Library() {
             </Link>
             <h1 className="font-semibold">Board library</h1>
           </div>
-          <Button size="sm" onClick={openNew}>
-            <Plus className="h-4 w-4" /> New board
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={async () => {
+                toast.info("Syncing boards with Supabase cloud...");
+                await syncWithCloud();
+                toast.success("Board library synced with cloud!");
+              }}
+              className="gap-1.5"
+            >
+              <Cloud className="h-4 w-4 text-emerald-500" />
+              <span>Cloud Sync</span>
+            </Button>
+            <Button size="sm" onClick={openNew}>
+              <Plus className="h-4 w-4" /> New board
+            </Button>
+          </div>
         </div>
       </header>
 

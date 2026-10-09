@@ -32,3 +32,6 @@ temp_apk_res/
 /rendered_index.html
 /web/
 .vscode/
+.env
+.env.*
+*.env

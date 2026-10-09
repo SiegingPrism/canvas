@@ -17,6 +17,7 @@ import {
 } from "@/components/whiteboard/widgets/BasicWidgets";
 import { RulerWidget } from "@/components/whiteboard/widgets/RulerWidget";
 import { useWhiteboard } from "@/lib/whiteboard/store";
+import { fetchBoardById } from "@/lib/supabase/dbService";
 import { Wand2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -51,7 +52,34 @@ function BoardPage() {
   useEffect(() => {
     if (!hydrated) return;
     if (!boardData[boardId]) {
-      navigate({ to: "/", replace: true });
+      fetchBoardById(boardId).then((cb) => {
+        if (cb) {
+          const pages = Array.isArray(cb.pages) && cb.pages.length
+            ? cb.pages
+            : [{ id: Math.random().toString(36).slice(2, 10), objects: [], background: (cb.background as any) || "white" }];
+          const meta = {
+            id: cb.id,
+            title: cb.title || "Untitled board",
+            tags: [],
+            folderId: cb.folder_id || null,
+            favorite: Boolean(cb.is_starred),
+            archived: false,
+            createdAt: cb.created_at ? new Date(cb.created_at).getTime() : Date.now(),
+            updatedAt: cb.updated_at ? new Date(cb.updated_at).getTime() : Date.now(),
+          };
+          useWhiteboard.setState((prev) => ({
+            ...prev,
+            boards: { ...prev.boards, [cb.id]: meta },
+            boardOrder: prev.boardOrder.includes(cb.id) ? prev.boardOrder : [cb.id, ...prev.boardOrder],
+            boardData: { ...prev.boardData, [cb.id]: { pages, activePageId: pages[0].id } },
+            activeBoardId: cb.id,
+            pages,
+            activePageId: pages[0].id,
+          }));
+        } else {
+          navigate({ to: "/", replace: true });
+        }
+      });
       return;
     }
     if (activeBoardId !== boardId) openBoard(boardId);
