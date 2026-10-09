@@ -1,5 +1,14 @@
 import { toast } from "sonner";
-import type { Page, Folder, RecentAI, CanvasObject } from "./types";
+import type { Page, CanvasObject } from "./types";
+
+export type Folder = { id: string; name: string };
+export type RecentAI = {
+  id: string;
+  prompt: string;
+  response: string;
+  boardId: string | null;
+  createdAt: number;
+};
 
 export type BoardMeta = {
   id: string;
@@ -171,13 +180,14 @@ export async function loadFromStorage(): Promise<FullPersistShape> {
     const db = await openDB();
 
     // Load meta
-    const meta: PersistMetaShape = await new Promise((resolve) => {
-      const tx = db.transaction(STORE_META, "readonly");
-      const store = tx.objectStore(STORE_META);
-      const req = store.get("meta");
-      req.onsuccess = () => resolve(req.result || null);
-      req.onerror = () => resolve(null);
-    }) || emptyMetaShape();
+    const meta: PersistMetaShape =
+      (await new Promise<PersistMetaShape | null>((resolve) => {
+        const tx = db.transaction(STORE_META, "readonly");
+        const store = tx.objectStore(STORE_META);
+        const req = store.get("meta");
+        req.onsuccess = () => resolve(req.result || null);
+        req.onerror = () => resolve(null);
+      })) || emptyMetaShape();
 
     // Load all board data
     const boardDataMap: Record<string, BoardData> = {};

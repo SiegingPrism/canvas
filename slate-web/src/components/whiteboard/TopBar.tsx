@@ -78,6 +78,8 @@ export function TopBar({
   const {
     pages,
     activePageId,
+    activeBoardId,
+    boards,
     prevPage,
     nextPage,
     addPage,

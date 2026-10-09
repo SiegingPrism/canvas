@@ -28,6 +28,8 @@ export type ElementData = {
   summary?: string;
 };
 
+export type ChemicalElement = ElementData;
+
 export const CATEGORY_COLORS: Record<
   ElementCategory,
   { bg: string; text: string; border: string; solidBg: string; name: string }

@@ -1,5 +1,6 @@
 import { getSupabase } from "./client";
-import type { BoardMeta, Page } from "../whiteboard/store";
+import type { BoardMeta } from "../whiteboard/store";
+import type { Page } from "../whiteboard/types";
 import type { Note } from "../notesStore";
 
 export interface CloudBoardRecord {

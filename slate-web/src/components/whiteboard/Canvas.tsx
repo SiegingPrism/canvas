@@ -585,7 +585,7 @@ export function WhiteboardCanvas({
     // Render live objects with color-coded paths & shapes
     for (const obj of page.objects) {
       const b = objectBounds(obj);
-      if (obj.kind === "stroke") {
+      if ("points" in obj) {
         const stroke = obj as StrokeBase;
         if (stroke.points && stroke.points.length > 1) {
           ctx.strokeStyle = stroke.color || "#60a5fa";
@@ -831,10 +831,11 @@ export function WhiteboardCanvas({
       return maxX >= viewLeft && minX <= viewRight && maxY >= viewTop && minY <= viewBottom;
     }
 
-    const ox = obj.x ?? 0;
-    const oy = obj.y ?? 0;
-    const ow = obj.w ?? 24;
-    const oh = obj.h ?? 24;
+    const o = obj as { x?: number; y?: number; w?: number; h?: number };
+    const ox = o.x ?? 0;
+    const oy = o.y ?? 0;
+    const ow = o.w ?? 24;
+    const oh = o.h ?? 24;
     const minX = Math.min(ox, ox + ow);
     const maxX = Math.max(ox, ox + ow);
     const minY = Math.min(oy, oy + oh);

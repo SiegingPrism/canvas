@@ -316,7 +316,7 @@ export function compileMathFunction(formula: string): (x: number) => number | nu
 /**
  * Direct evaluation helper (used for single-point checks).
  */
-export function safeEvaluateMath(formula: string, x: number): number | null {
+export function safeEvaluateMath(formula: string, x: number = 0): number | null {
   const fn = compileMathFunction(formula);
   return fn(x);
 }
