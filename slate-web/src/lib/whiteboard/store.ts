@@ -112,11 +112,43 @@ type Actions = {
 
 type State = WhiteboardState & PersistShape & { activeBoardId: string | null; hydrated: boolean };
 
-let cloudSyncTimer: ReturnType<typeof setTimeout> | null = null;
+const cloudSyncTimers: Record<string, ReturnType<typeof setTimeout>> = {};
+const LS_DELETED_BOARDS_KEY = "slate_deleted_boards_tombstones";
+
+function getDeletedBoardIds(): Set<string> {
+  if (typeof window === "undefined") return new Set();
+  try {
+    const raw = localStorage.getItem(LS_DELETED_BOARDS_KEY);
+    if (raw) return new Set(JSON.parse(raw));
+  } catch {}
+  return new Set();
+}
+
+function recordDeletedBoard(id: string) {
+  if (typeof window === "undefined" || !id) return;
+  try {
+    const set = getDeletedBoardIds();
+    set.add(id);
+    localStorage.setItem(LS_DELETED_BOARDS_KEY, JSON.stringify(Array.from(set)));
+  } catch {}
+}
+
+function removeDeletedBoardTombstone(id: string) {
+  if (typeof window === "undefined" || !id) return;
+  try {
+    const set = getDeletedBoardIds();
+    if (set.has(id)) {
+      set.delete(id);
+      localStorage.setItem(LS_DELETED_BOARDS_KEY, JSON.stringify(Array.from(set)));
+    }
+  } catch {}
+}
+
 function triggerCloudSync(meta: BoardMeta, pages: Page[]) {
-  if (typeof window === "undefined") return;
-  if (cloudSyncTimer) clearTimeout(cloudSyncTimer);
-  cloudSyncTimer = setTimeout(() => {
+  if (typeof window === "undefined" || !meta?.id) return;
+  if (cloudSyncTimers[meta.id]) clearTimeout(cloudSyncTimers[meta.id]);
+  cloudSyncTimers[meta.id] = setTimeout(() => {
+    delete cloudSyncTimers[meta.id];
     syncBoardToSupabase(meta, pages).catch(() => {});
   }, 1200);
 }
@@ -543,6 +575,11 @@ export const useWhiteboard = create<State & Actions>((set, get) => {
       set(next);
     },
     deleteBoard: (id) => {
+      recordDeletedBoard(id);
+      if (cloudSyncTimers[id]) {
+        clearTimeout(cloudSyncTimers[id]);
+        delete cloudSyncTimers[id];
+      }
       const s = get();
       const { [id]: _m, ...boards } = s.boards;
       const { [id]: _d, ...boardData } = s.boardData;
@@ -668,7 +705,13 @@ export const useWhiteboard = create<State & Actions>((set, get) => {
         const mergedBoardData = { ...s.boardData };
         const mergedBoardOrder = [...s.boardOrder];
 
+        const deletedIds = getDeletedBoardIds();
         for (const cb of cloudBoards) {
+          if (deletedIds.has(cb.id)) {
+            // Board was deleted locally, do not resurrect! Clean up from cloud
+            deleteBoardFromSupabase(cb.id).catch(() => {});
+            continue;
+          }
           const localMeta = mergedBoards[cb.id];
           if (!localMeta || (cb.updated_at && new Date(cb.updated_at).getTime() > localMeta.updatedAt)) {
             const updatedAt = cb.updated_at ? new Date(cb.updated_at).getTime() : nowMs();
@@ -710,12 +753,12 @@ export const useWhiteboard = create<State & Actions>((set, get) => {
 });
 
 if (typeof window !== "undefined") {
-  // 1. Initial fast load from synchronous store for instant rendering
+  // 1. Initial fast load from synchronous store for instant rendering (keeps hydrated: false until full data is ready)
   const initial = loadInitialSync();
   if (Object.keys(initial.boards).length > 0) {
     useWhiteboard.setState((prev) => ({
       ...initial,
-      hydrated: true,
+      hydrated: false,
       activeBoardId: prev.activeBoardId || null,
       pages:
         prev.activeBoardId && initial.boardData[prev.activeBoardId]?.pages?.length
@@ -742,5 +785,6 @@ if (typeof window !== "undefined") {
     })
     .catch((err) => {
       console.warn("[Whiteboard] Storage hydration failure:", err);
+      useWhiteboard.setState({ hydrated: true });
     });
 }

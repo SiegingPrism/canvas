@@ -16,6 +16,7 @@ import { useWhiteboard } from "@/lib/whiteboard/store";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { AIEngine } from "@/lib/ai/aiEngine";
+import { compileMathFunction } from "@/lib/whiteboard/safeMath";
 
 export function TimerWidget() {
   const [total, setTotal] = useState(60);
@@ -510,30 +511,19 @@ export function MathGraphWidget() {
     ctx.lineWidth = 2;
     ctx.beginPath();
     let started = false;
+    const evalFn = compileMathFunction(fn);
     for (let px = 0; px < w; px++) {
       const curX = xMin + (px / w) * (xMax - xMin);
-      try {
-        let clean = fn.toLowerCase().replace(/\^/g, "**");
-        clean = clean
-          .replace(/\bsin\b/g, "Math.sin")
-          .replace(/\bcos\b/g, "Math.cos")
-          .replace(/\btan\b/g, "Math.tan")
-          .replace(/\bsqrt\b/g, "Math.sqrt")
-          .replace(/\bexp\b/g, "Math.exp")
-          .replace(/(\d)([a-zA-Z(])/g, "$1*$2");
-        const val = Number(new Function("x", `"use strict"; return (${clean});`)(curX));
-        if (isFinite(val)) {
-          const py = toSy(val);
-          if (!started) {
-            ctx.moveTo(px, py);
-            started = true;
-          } else {
-            ctx.lineTo(px, py);
-          }
+      const val = evalFn(curX);
+      if (val !== null && isFinite(val)) {
+        const py = toSy(val);
+        if (!started) {
+          ctx.moveTo(px, py);
+          started = true;
         } else {
-          started = false;
+          ctx.lineTo(px, py);
         }
-      } catch {
+      } else {
         started = false;
       }
     }

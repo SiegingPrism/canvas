@@ -122,6 +122,22 @@ export function emptyFullPersist(): FullPersistShape {
 export function loadInitialSync(): FullPersistShape {
   if (typeof window === "undefined") return emptyFullPersist();
 
+  const emergencyBoardData: Record<string, BoardData> = {};
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && key.startsWith("slate_b_")) {
+        const bId = key.slice("slate_b_".length);
+        const raw = localStorage.getItem(key);
+        if (raw) {
+          emergencyBoardData[bId] = JSON.parse(raw);
+        }
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+
   // 1. Try modern lightweight meta key
   try {
     const metaRaw = localStorage.getItem(LS_META_KEY);
@@ -132,7 +148,7 @@ export function loadInitialSync(): FullPersistShape {
         boardOrder: parsed.boardOrder || [],
         folders: parsed.folders || [],
         recentAI: parsed.recentAI || [],
-        boardData: {},
+        boardData: emergencyBoardData,
       };
     }
   } catch (err) {
@@ -149,18 +165,19 @@ export function loadInitialSync(): FullPersistShape {
         boardOrder: parsed.boardOrder || [],
         folders: parsed.folders || [],
         recentAI: parsed.recentAI || [],
-        boardData: parsed.boardData || {},
+        boardData: { ...(parsed.boardData || {}), ...emergencyBoardData },
       };
     }
   } catch {
     /* ignore */
   }
 
-  return emptyFullPersist();
+  return { ...emptyMetaShape(), boardData: emergencyBoardData };
 }
 
 /**
  * Loads all data asynchronously from IndexedDB, migrating legacy localStorage blobs if present.
+ * Also restores emergency backup boards (slate_b_<id>) saved to localStorage when IndexedDB previously failed.
  */
 export async function loadFromStorage(): Promise<FullPersistShape> {
   if (typeof window === "undefined") return emptyFullPersist();
@@ -189,7 +206,7 @@ export async function loadFromStorage(): Promise<FullPersistShape> {
         req.onerror = () => resolve(null);
       })) || emptyMetaShape();
 
-    // Load all board data
+    // Load all board data from IndexedDB
     const boardDataMap: Record<string, BoardData> = {};
     await new Promise<void>((resolve) => {
       const tx = db.transaction(STORE_BOARDS, "readonly");
@@ -207,16 +224,57 @@ export async function loadFromStorage(): Promise<FullPersistShape> {
       req.onerror = () => resolve();
     });
 
+    // Check and restore emergency backup boards from localStorage (slate_b_<id>)
+    try {
+      const restoredKeys: string[] = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (key && key.startsWith("slate_b_")) {
+          const bId = key.slice("slate_b_".length);
+          if (bId) {
+            try {
+              const raw = localStorage.getItem(key);
+              if (raw) {
+                const emergencyData: BoardData = JSON.parse(raw);
+                if (emergencyData && Array.isArray(emergencyData.pages)) {
+                  boardDataMap[bId] = emergencyData;
+                  restoredKeys.push(key);
+                  // Write emergency copy into IndexedDB so it's safely in the primary store
+                  try {
+                    const tx = db.transaction(STORE_BOARDS, "readwrite");
+                    tx.objectStore(STORE_BOARDS).put(emergencyData, bId);
+                  } catch {
+                    /* ignore */
+                  }
+                }
+              }
+            } catch (err) {
+              console.warn("[SlateStorage] Could not parse emergency backup for", bId, err);
+            }
+          }
+        }
+      }
+      for (const k of restoredKeys) {
+        try {
+          localStorage.removeItem(k);
+        } catch {
+          /* ignore */
+        }
+      }
+    } catch (emergencyErr) {
+      console.warn("[SlateStorage] Failed scanning emergency backups:", emergencyErr);
+    }
+
     // If IndexedDB had nothing but legacy localStorage has data, migrate it!
     if (Object.keys(boardDataMap).length === 0 && legacyData && Object.keys(legacyData.boards || {}).length > 0) {
       console.log("[SlateStorage] Migrating localStorage boards into IndexedDB...");
-      await saveFullPersist(legacyData);
-      // Clean up the massive localStorage blob to free the 5MB quota
       try {
+        await saveFullPersist(legacyData);
+        // Clean up the massive localStorage blob to free the 5MB quota ONLY after save completes successfully!
         localStorage.removeItem(LS_MULTI_KEY);
         localStorage.removeItem(LS_LEGACY_KEY);
-      } catch {
-        /* ignore */
+      } catch (migrationErr) {
+        console.error("[SlateStorage] Migration failed; keeping legacy localStorage copy:", migrationErr);
       }
       return legacyData;
     }
@@ -236,12 +294,58 @@ export async function loadFromStorage(): Promise<FullPersistShape> {
 }
 
 /**
- * Save single board data into IndexedDB (debounced per board)
+ * Save single board data into IndexedDB (debounced per board with pending buffer)
  */
+const pendingBoardData = new Map<string, BoardData>();
+let pendingMetaData: PersistMetaShape | null = null;
 const boardSaveDebounceTimers: Record<string, NodeJS.Timeout> = {};
+let metaSaveDebounceTimer: NodeJS.Timeout | null = null;
+
+async function commitBoardSave(boardId: string): Promise<void> {
+  const data = pendingBoardData.get(boardId);
+  if (!data) return;
+
+  try {
+    const db = await openDB();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(STORE_BOARDS, "readwrite");
+      tx.onabort = () => {
+        notifyStorageError(tx.error);
+        reject(tx.error || new Error("Save aborted"));
+      };
+      tx.onerror = () => {
+        notifyStorageError(tx.error);
+        reject(tx.error || new Error("Save error"));
+      };
+      tx.oncomplete = () => {
+        resolve();
+      };
+      const store = tx.objectStore(STORE_BOARDS);
+      store.put(data, boardId);
+    });
+
+    // Successfully committed to IndexedDB; clear emergency copy and pending cache
+    try {
+      localStorage.removeItem(`slate_b_${boardId}`);
+    } catch {
+      /* ignore */
+    }
+    pendingBoardData.delete(boardId);
+  } catch (err) {
+    notifyStorageError(err);
+    // Fallback: save to per-board key in localStorage
+    try {
+      localStorage.setItem(`slate_b_${boardId}`, JSON.stringify(data));
+    } catch (lsErr) {
+      notifyStorageError(lsErr);
+    }
+  }
+}
 
 export function saveBoardDataAsync(boardId: string, data: BoardData): void {
   if (typeof window === "undefined" || !boardId) return;
+
+  pendingBoardData.set(boardId, data);
 
   if (boardSaveDebounceTimers[boardId]) {
     clearTimeout(boardSaveDebounceTimers[boardId]);
@@ -249,32 +353,45 @@ export function saveBoardDataAsync(boardId: string, data: BoardData): void {
 
   boardSaveDebounceTimers[boardId] = setTimeout(async () => {
     delete boardSaveDebounceTimers[boardId];
-    try {
-      const db = await openDB();
-      const tx = db.transaction(STORE_BOARDS, "readwrite");
-      tx.onabort = () => notifyStorageError(tx.error);
-      tx.onerror = () => notifyStorageError(tx.error);
-      const store = tx.objectStore(STORE_BOARDS);
-      store.put(data, boardId);
-    } catch (err) {
-      notifyStorageError(err);
-      // Fallback: save to per-board key in localStorage if small enough
-      try {
-        localStorage.setItem(`slate_b_${boardId}`, JSON.stringify(data));
-      } catch (lsErr) {
-        notifyStorageError(lsErr);
-      }
-    }
+    await commitBoardSave(boardId);
   }, 250);
+}
+
+async function commitMetaSave(): Promise<void> {
+  const meta = pendingMetaData;
+  if (!meta) return;
+
+  try {
+    const db = await openDB();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(STORE_META, "readwrite");
+      tx.onabort = () => {
+        notifyStorageError(tx.error);
+        reject(tx.error || new Error("Meta save aborted"));
+      };
+      tx.onerror = () => {
+        notifyStorageError(tx.error);
+        reject(tx.error || new Error("Meta save error"));
+      };
+      tx.oncomplete = () => {
+        resolve();
+      };
+      const store = tx.objectStore(STORE_META);
+      store.put(meta, "meta");
+    });
+    pendingMetaData = null;
+  } catch (err) {
+    notifyStorageError(err);
+  }
 }
 
 /**
  * Save meta to both IndexedDB and lightweight localStorage key
  */
-let metaSaveDebounceTimer: NodeJS.Timeout | null = null;
-
 export function saveMetaAsync(meta: PersistMetaShape): void {
   if (typeof window === "undefined") return;
+
+  pendingMetaData = meta;
 
   // 1. Immediately write lightweight meta to localStorage so it's synchronously available
   try {
@@ -287,44 +404,98 @@ export function saveMetaAsync(meta: PersistMetaShape): void {
   if (metaSaveDebounceTimer) clearTimeout(metaSaveDebounceTimer);
   metaSaveDebounceTimer = setTimeout(async () => {
     metaSaveDebounceTimer = null;
-    try {
-      const db = await openDB();
-      const tx = db.transaction(STORE_META, "readwrite");
-      tx.onabort = () => notifyStorageError(tx.error);
-      tx.onerror = () => notifyStorageError(tx.error);
-      const store = tx.objectStore(STORE_META);
-      store.put(meta, "meta");
-    } catch (err) {
-      notifyStorageError(err);
-    }
+    await commitMetaSave();
   }, 200);
 }
 
 /**
- * Save full state (e.g. during initial cloud sync or import)
+ * Flush all pending debounced writes immediately to disk.
+ * Synchronously writes emergency copies to localStorage first to guarantee zero data loss
+ * if Android kills the WebView before the async IndexedDB transaction resolves.
+ */
+export async function flushAllPendingSaves(): Promise<void> {
+  if (typeof window === "undefined") return;
+
+  // Clear debounce timers
+  for (const boardId of Object.keys(boardSaveDebounceTimers)) {
+    clearTimeout(boardSaveDebounceTimers[boardId]);
+    delete boardSaveDebounceTimers[boardId];
+  }
+  if (metaSaveDebounceTimer) {
+    clearTimeout(metaSaveDebounceTimer);
+    metaSaveDebounceTimer = null;
+  }
+
+  // Synchronous emergency write to localStorage
+  for (const [boardId, data] of pendingBoardData.entries()) {
+    try {
+      localStorage.setItem(`slate_b_${boardId}`, JSON.stringify(data));
+    } catch {
+      /* ignore */
+    }
+  }
+  if (pendingMetaData) {
+    try {
+      localStorage.setItem(LS_META_KEY, JSON.stringify(pendingMetaData));
+    } catch {
+      /* ignore */
+    }
+  }
+
+  // Commit to IndexedDB
+  const promises: Promise<void>[] = [];
+  for (const boardId of Array.from(pendingBoardData.keys())) {
+    promises.push(commitBoardSave(boardId));
+  }
+  if (pendingMetaData) {
+    promises.push(commitMetaSave());
+  }
+  await Promise.allSettled(promises);
+}
+
+/**
+ * Save full state (e.g. during initial cloud sync or migration).
+ * Strictly waits for IndexedDB transaction to finish before resolving.
  */
 export async function saveFullPersist(shape: FullPersistShape): Promise<void> {
   if (typeof window === "undefined") return;
 
-  saveMetaAsync({
+  const metaData = {
     boards: shape.boards,
     boardOrder: shape.boardOrder,
     folders: shape.folders,
     recentAI: shape.recentAI,
-  });
+  };
 
   try {
-    const db = await openDB();
-    const tx = db.transaction(STORE_BOARDS, "readwrite");
-    tx.onabort = () => notifyStorageError(tx.error);
-    tx.onerror = () => notifyStorageError(tx.error);
-    const store = tx.objectStore(STORE_BOARDS);
-    for (const [id, data] of Object.entries(shape.boardData || {})) {
-      store.put(data, id);
-    }
-  } catch (err) {
-    notifyStorageError(err);
+    localStorage.setItem(LS_META_KEY, JSON.stringify(metaData));
+  } catch (lsErr) {
+    notifyStorageError(lsErr);
   }
+
+  const db = await openDB();
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction([STORE_BOARDS, STORE_META], "readwrite");
+    tx.onabort = () => {
+      notifyStorageError(tx.error);
+      reject(tx.error || new Error("saveFullPersist aborted"));
+    };
+    tx.onerror = () => {
+      notifyStorageError(tx.error);
+      reject(tx.error || new Error("saveFullPersist error"));
+    };
+    tx.oncomplete = () => {
+      resolve();
+    };
+
+    const metaStore = tx.objectStore(STORE_META);
+    metaStore.put(metaData, "meta");
+
+    const boardStore = tx.objectStore(STORE_BOARDS);
+    for (const [id, data] of Object.entries(shape.boardData || {})) {
+      boardStore.put(data, id);
+    }
+  });
 }
 
 /**
@@ -332,6 +503,13 @@ export async function saveFullPersist(shape: FullPersistShape): Promise<void> {
  */
 export async function deleteBoardFromStorage(boardId: string): Promise<void> {
   if (typeof window === "undefined") return;
+
+  pendingBoardData.delete(boardId);
+  if (boardSaveDebounceTimers[boardId]) {
+    clearTimeout(boardSaveDebounceTimers[boardId]);
+    delete boardSaveDebounceTimers[boardId];
+  }
+
   try {
     const db = await openDB();
     const tx = db.transaction(STORE_BOARDS, "readwrite");
@@ -346,3 +524,36 @@ export async function deleteBoardFromStorage(boardId: string): Promise<void> {
     /* ignore */
   }
 }
+
+// Platform lifecycle listeners & persistent storage registration
+if (typeof window !== "undefined") {
+  // Request persistent storage so Android / Chromium does not evict data under space pressure
+  if (typeof navigator !== "undefined" && navigator.storage && navigator.storage.persist) {
+    navigator.storage.persist().catch(() => {});
+  }
+
+  const handleFlush = () => {
+    flushAllPendingSaves().catch(() => {});
+  };
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") {
+      handleFlush();
+    }
+  });
+  window.addEventListener("pagehide", handleFlush);
+  window.addEventListener("beforeunload", handleFlush);
+  document.addEventListener("pause", handleFlush);
+
+  try {
+    const cap = (window as unknown as { Capacitor?: { Plugins?: { App?: { addListener: (evt: string, cb: (state: { isActive: boolean }) => void) => void } } } })?.Capacitor;
+    cap?.Plugins?.App?.addListener("appStateChange", (state) => {
+      if (!state.isActive) {
+        handleFlush();
+      }
+    });
+  } catch {
+    /* ignore */
+  }
+}
+

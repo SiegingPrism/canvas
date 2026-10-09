@@ -32,6 +32,27 @@ describe("safeMath evaluator and compiler", () => {
     expect(fn(Math.PI)).toBeCloseTo(0);
   });
 
+  it("correctly handles unary minus precedence (-x^2 and -2^2)", () => {
+    // -x^2 at x=1 should be -1, so -x^2 + 4 at x=1 must be 3
+    expect(safeEvaluateMath("-x^2 + 4", 1)).toBe(3);
+    expect(safeEvaluateMath("-x^2 + 4", 2)).toBe(0);
+    // -2^2 should be -(2^2) = -4
+    expect(safeEvaluateMath("-2^2")).toBe(-4);
+    // (-2)^2 should be 4
+    expect(safeEvaluateMath("(-2)^2")).toBe(4);
+    // Negative exponent 2^-3 = 0.125
+    expect(safeEvaluateMath("2^-3")).toBe(0.125);
+  });
+
+  it("handles log10 and scientific notation without splitting", () => {
+    // log10(x) should not be split into log10*(x)
+    expect(safeEvaluateMath("log10(100)")).toBe(2);
+    expect(safeEvaluateMath("log10(x)", 1000)).toBe(3);
+    // 1e-3 should be 0.001, not 1*e - 3
+    expect(safeEvaluateMath("1e-3")).toBe(0.001);
+    expect(safeEvaluateMath("2.5e2")).toBe(250);
+  });
+
   it("strictly prevents code injection attempts", () => {
     // Malicious injection strings should evaluate to null without executing any code
     expect(safeEvaluateMath("console.log('attack')")).toBeNull();

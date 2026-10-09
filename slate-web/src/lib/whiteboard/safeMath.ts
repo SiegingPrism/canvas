@@ -51,11 +51,7 @@ function tokenize(input: string): Token[] | null {
   let expr = input.toLowerCase().trim();
   expr = expr.replace(/^y\s*=\s*/, "").replace(/^f\(x\)\s*=\s*/, "");
 
-  // Insert implicit multiplication: e.g. 2x -> 2*x, 3( -> 3*(, )x -> )*x
-  expr = expr.replace(/(\d)\s*([a-zπ(])/g, "$1*$2");
-  expr = expr.replace(/(\))\s*([a-z0-9π(])/g, "$1*$2");
-
-  const tokens: Token[] = [];
+  const rawTokens: Token[] = [];
   let i = 0;
   const n = expr.length;
 
@@ -66,36 +62,40 @@ function tokenize(input: string): Token[] | null {
       continue;
     }
 
+    // Number matching, including scientific notation like 1e-3, 2.5e+4, 1e5
+    // But NOT matching if 'e' is followed by non-digits, so 1e is parsed as 1 and e
     if (/\d|\./.test(ch)) {
-      let numStr = "";
-      while (i < n && /[\d.]/.test(expr[i])) {
-        numStr += expr[i++];
+      const rest = expr.slice(i);
+      const numMatch = rest.match(/^(\d+(?:\.\d+)?(?:e[+-]?\d+)?|\.\d+(?:e[+-]?\d+)?)/i);
+      if (numMatch && numMatch[0]) {
+        const numStr = numMatch[0];
+        const val = parseFloat(numStr);
+        if (isNaN(val)) return null;
+        rawTokens.push({ type: "num", value: val });
+        i += numStr.length;
+        continue;
       }
-      const val = parseFloat(numStr);
-      if (isNaN(val)) return null;
-      tokens.push({ type: "num", value: val });
-      continue;
     }
 
     if (ch === "+" || ch === "-" || ch === "*" || ch === "/" || ch === "^") {
       // Support ** as ^
       if (ch === "*" && expr[i + 1] === "*") {
-        tokens.push({ type: "op", value: "^" });
+        rawTokens.push({ type: "op", value: "^" });
         i += 2;
         continue;
       }
-      tokens.push({ type: "op", value: ch });
+      rawTokens.push({ type: "op", value: ch });
       i++;
       continue;
     }
 
     if (ch === "(") {
-      tokens.push({ type: "lparen" });
+      rawTokens.push({ type: "lparen" });
       i++;
       continue;
     }
     if (ch === ")") {
-      tokens.push({ type: "rparen" });
+      rawTokens.push({ type: "rparen" });
       i++;
       continue;
     }
@@ -107,17 +107,17 @@ function tokenize(input: string): Token[] | null {
       }
 
       if (ident === "x") {
-        tokens.push({ type: "var", name: "x" });
+        rawTokens.push({ type: "var", name: "x" });
         continue;
       }
 
       if (ident in KNOWN_CONSTANTS) {
-        tokens.push({ type: "num", value: KNOWN_CONSTANTS[ident] });
+        rawTokens.push({ type: "num", value: KNOWN_CONSTANTS[ident] });
         continue;
       }
 
       if (ident in KNOWN_FUNCTIONS) {
-        tokens.push({ type: "fn", name: ident });
+        rawTokens.push({ type: "fn", name: ident });
         continue;
       }
 
@@ -127,6 +127,26 @@ function tokenize(input: string): Token[] | null {
 
     // Unknown character
     return null;
+  }
+
+  // Insert implicit multiplication: e.g. 2x -> 2*x, 3( -> 3*(, )x -> )*x, )( -> )*(, 2sin(x) -> 2*sin(x)
+  // Preserves log10(x) where log10 is fn token, NOT num followed by (
+  const tokens: Token[] = [];
+  for (let j = 0; j < rawTokens.length; j++) {
+    const cur = rawTokens[j];
+    tokens.push(cur);
+    if (j < rawTokens.length - 1) {
+      const next = rawTokens[j + 1];
+      const canEndFactor = cur.type === "num" || cur.type === "var" || cur.type === "rparen";
+      const canStartFactor =
+        next.type === "var" ||
+        next.type === "fn" ||
+        next.type === "lparen" ||
+        (next.type === "num" && (cur.type === "rparen" || cur.type === "num"));
+      if (canEndFactor && canStartFactor) {
+        tokens.push({ type: "op", value: "*" });
+      }
+    }
   }
 
   return tokens;
@@ -157,7 +177,10 @@ class Parser {
   // Expression: additive (+, -)
   private parseExpression(): ASTNode {
     let node = this.parseTerm();
-    while (this.peek()?.type === "op" && (this.peek() as any).value === "+" || (this.peek() as any)?.value === "-") {
+    while (
+      (this.peek()?.type === "op" && (this.peek() as any).value === "+") ||
+      (this.peek()?.type === "op" && (this.peek() as any).value === "-")
+    ) {
       const op = (this.consume() as any).value as "+" | "-";
       const right = this.parseTerm();
       node = { type: "binop", op, left: node, right };
@@ -167,13 +190,31 @@ class Parser {
 
   // Term: multiplicative (*, /)
   private parseTerm(): ASTNode {
-    let node = this.parsePower();
-    while (this.peek()?.type === "op" && (this.peek() as any).value === "*" || (this.peek() as any)?.value === "/") {
+    let node = this.parseUnary();
+    while (
+      (this.peek()?.type === "op" && (this.peek() as any).value === "*") ||
+      (this.peek()?.type === "op" && (this.peek() as any).value === "/")
+    ) {
       const op = (this.consume() as any).value as "*" | "/";
-      const right = this.parsePower();
+      const right = this.parseUnary();
       node = { type: "binop", op, left: node, right };
     }
     return node;
+  }
+
+  // Unary: prefix - or + (applies AFTER ^ is evaluated, so -x^2 is -(x^2))
+  private parseUnary(): ASTNode {
+    const t = this.peek();
+    if (t?.type === "op" && t.value === "-") {
+      this.consume();
+      const arg = this.parseUnary();
+      return { type: "unary", op: "-", arg };
+    }
+    if (t?.type === "op" && t.value === "+") {
+      this.consume();
+      return this.parseUnary();
+    }
+    return this.parsePower();
   }
 
   // Power: ^ (right-associative)
@@ -181,27 +222,16 @@ class Parser {
     let node = this.parseFactor();
     if (this.peek()?.type === "op" && (this.peek() as any).value === "^") {
       this.consume();
-      const right = this.parsePower();
+      const right = this.parseUnary();
       node = { type: "binop", op: "^", left: node, right };
     }
     return node;
   }
 
-  // Factor: unary, calls, parens, literals
+  // Factor: literals, variables, function calls, parenthesized expressions
   private parseFactor(): ASTNode {
     const t = this.peek();
     if (!t) throw new Error("Unexpected end of tokens");
-
-    // Unary plus/minus
-    if (t.type === "op" && t.value === "-") {
-      this.consume();
-      const arg = this.parseFactor();
-      return { type: "unary", op: "-", arg };
-    }
-    if (t.type === "op" && t.value === "+") {
-      this.consume();
-      return this.parseFactor();
-    }
 
     if (t.type === "num") {
       this.consume();

@@ -52,6 +52,10 @@ function BoardPage() {
   useEffect(() => {
     if (!hydrated) return;
     if (!boardData[boardId]) {
+      if (boards[boardId]) {
+        openBoard(boardId);
+        return;
+      }
       fetchBoardById(boardId).then((cb) => {
         if (cb) {
           const pages = Array.isArray(cb.pages) && cb.pages.length
@@ -77,13 +81,17 @@ function BoardPage() {
             activePageId: pages[0].id,
           }));
         } else {
-          navigate({ to: "/", replace: true });
+          if (boards[boardId]) {
+            openBoard(boardId);
+          } else {
+            navigate({ to: "/", replace: true });
+          }
         }
       });
       return;
     }
     if (activeBoardId !== boardId) openBoard(boardId);
-  }, [boardId, boardData, activeBoardId, openBoard, navigate, hydrated]);
+  }, [boardId, boardData, boards, activeBoardId, openBoard, navigate, hydrated]);
 
   useEffect(() => {
     const handleOpenWidgets = () => setWidgetsOpen(true);
