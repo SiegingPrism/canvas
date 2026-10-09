@@ -123,6 +123,79 @@ export class AIEngine {
   }
 
   /**
+   * Decodes raw response text that may be plain text, a JSON payload ({ text: "..." }),
+   * or an SSE / Vercel AI stream containing "data: {...}" or "0:\"...\"" chunks.
+   */
+  static decodeStreamOrText(raw: string): string {
+    const trimmed = raw.trim();
+    if (!trimmed) return "";
+
+    // 1. Check if it's already a JSON object like { text: "..." }
+    if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (typeof parsed.text === "string") return parsed.text.trim();
+        if (typeof parsed.response === "string") return parsed.response.trim();
+        if (typeof parsed.content === "string") return parsed.content.trim();
+      } catch {
+        // Not simple JSON, continue
+      }
+    }
+
+    // 2. Check if it's an SSE / Vercel AI Stream (contains "data:" or stream line headers)
+    if (trimmed.includes("data:") || /^(?:[0-9a-f]+|data):/m.test(trimmed)) {
+      const lines = trimmed.split(/\r?\n/);
+      let accumulated = "";
+      let foundStreamPattern = false;
+
+      for (const line of lines) {
+        const l = line.trim();
+        if (!l) continue;
+
+        if (l.startsWith("data:")) {
+          foundStreamPattern = true;
+          const dataContent = l.slice(5).trim();
+          if (dataContent === "[DONE]") continue;
+          try {
+            const parsed = JSON.parse(dataContent);
+            if (typeof parsed === "string") {
+              accumulated += parsed;
+            } else if (parsed && typeof parsed === "object") {
+              if (parsed.textDelta) accumulated += parsed.textDelta;
+              else if (parsed.delta) accumulated += parsed.delta;
+              else if (parsed.text) accumulated += parsed.text;
+              else if (parsed.content) accumulated += parsed.content;
+              else if (parsed.parts && Array.isArray(parsed.parts)) {
+                for (const p of parsed.parts) {
+                  if (typeof p === "string") accumulated += p;
+                  else if (p?.text) accumulated += p.text;
+                }
+              }
+            }
+          } catch {
+            accumulated += dataContent;
+          }
+        } else if (/^[0-9]:"/.test(l)) {
+          // Vercel AI SDK text part: 0:"hello"
+          foundStreamPattern = true;
+          try {
+            const parsed = JSON.parse(l.slice(2));
+            if (typeof parsed === "string") accumulated += parsed;
+          } catch {
+            // ignore
+          }
+        }
+      }
+
+      if (foundStreamPattern && accumulated.trim()) {
+        return accumulated.trim();
+      }
+    }
+
+    return trimmed;
+  }
+
+  /**
    * Universal fetch: Tries local /api/... first, then falls back to direct client provider call.
    */
   private static async requestLLM(prompt: string, imageDataUrl?: string): Promise<string | null> {
@@ -148,6 +221,7 @@ export class AIEngine {
             apiKey: effectiveKey,
             provider: config.provider,
             baseURL: config.customBaseURL,
+            stream: false,
           };
 
       const controller = new AbortController();
@@ -161,13 +235,9 @@ export class AIEngine {
       clearTimeout(timeoutId);
 
       if (res.ok) {
-        if (imageDataUrl) {
-          const json = await res.json();
-          if (json.text?.trim()) return json.text.trim();
-        } else {
-          const text = await res.text();
-          if (text?.trim()) return text.trim();
-        }
+        const rawText = await res.text();
+        const decoded = this.decodeStreamOrText(rawText);
+        if (decoded) return decoded;
       }
     } catch {
       // Local endpoint failed or timed out (expected in standalone Android APK)

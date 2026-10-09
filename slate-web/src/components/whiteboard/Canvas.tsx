@@ -61,6 +61,7 @@ import {
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { AIEngine } from "@/lib/ai/aiEngine";
+import { compileMathFunction } from "@/lib/whiteboard/safeMath";
 import type { MindMapNode } from "@/lib/ai/offlineAssistant";
 
 function uid() {
@@ -808,6 +809,40 @@ export function WhiteboardCanvas({
     return { x: x * camera.zoom + camera.x, y: y * camera.zoom + camera.y };
   }
 
+  function isObjectInViewport(
+    obj: CanvasObject,
+    viewLeft: number,
+    viewTop: number,
+    viewRight: number,
+    viewBottom: number,
+  ): boolean {
+    if ("points" in obj && Array.isArray(obj.points) && obj.points.length > 0) {
+      let minX = obj.points[0].x;
+      let maxX = obj.points[0].x;
+      let minY = obj.points[0].y;
+      let maxY = obj.points[0].y;
+      for (let i = 1; i < obj.points.length; i++) {
+        const p = obj.points[i];
+        if (p.x < minX) minX = p.x;
+        if (p.x > maxX) maxX = p.x;
+        if (p.y < minY) minY = p.y;
+        if (p.y > maxY) maxY = p.y;
+      }
+      return maxX >= viewLeft && minX <= viewRight && maxY >= viewTop && minY <= viewBottom;
+    }
+
+    const ox = obj.x ?? 0;
+    const oy = obj.y ?? 0;
+    const ow = obj.w ?? 24;
+    const oh = obj.h ?? 24;
+    const minX = Math.min(ox, ox + ow);
+    const maxX = Math.max(ox, ox + ow);
+    const minY = Math.min(oy, oy + oh);
+    const maxY = Math.max(oy, oy + oh);
+
+    return maxX >= viewLeft && minX <= viewRight && maxY >= viewTop && minY <= viewBottom;
+  }
+
   const redraw = useCallback(() => {
     const c = canvasRef.current;
     if (!c) return;
@@ -823,12 +858,23 @@ export function WhiteboardCanvas({
     ctx.translate(camera.x, camera.y);
     ctx.scale(camera.zoom, camera.zoom);
 
-    // Draw objects
+    // World viewport boundaries with safety padding for smooth panning
+    const screenW = c.width / dpr;
+    const screenH = c.height / dpr;
+    const pad = 120 / Math.max(camera.zoom, 0.05);
+    const viewLeft = (0 - camera.x) / camera.zoom - pad;
+    const viewTop = (0 - camera.y) / camera.zoom - pad;
+    const viewRight = (screenW - camera.x) / camera.zoom + pad;
+    const viewBottom = (screenH - camera.y) / camera.zoom + pad;
+
+    // Draw objects with high-performance viewport culling
     const selectedSet = new Set(
       selectedIds.length > 0 ? selectedIds : selectedId ? [selectedId] : [],
     );
     for (const obj of page.objects) {
-      drawObject(ctx, obj, selectedSet.has(obj.id));
+      if (selectedSet.has(obj.id) || isObjectInViewport(obj, viewLeft, viewTop, viewRight, viewBottom)) {
+        drawObject(ctx, obj, selectedSet.has(obj.id));
+      }
     }
     ctx.restore();
 
@@ -3524,29 +3570,8 @@ export function WhiteboardCanvas({
   }
 
   function evaluateMathFunction(fn: string, x: number): number | null {
-    try {
-      let expr = fn.toLowerCase().trim();
-      expr = expr.replace(/^y\s*=\s*/, "").replace(/^f\(x\)\s*=\s*/, "");
-      expr = expr.replace(/\^/g, "**");
-      expr = expr
-        .replace(/\bsin\b/g, "Math.sin")
-        .replace(/\bcos\b/g, "Math.cos")
-        .replace(/\btan\b/g, "Math.tan")
-        .replace(/\bsqrt\b/g, "Math.sqrt")
-        .replace(/\babs\b/g, "Math.abs")
-        .replace(/\bexp\b/g, "Math.exp")
-        .replace(/\bln\b/g, "Math.log")
-        .replace(/\blog\b/g, "Math.log10")
-        .replace(/\bpi\b/g, "Math.PI")
-        .replace(/\be\b/g, "Math.E");
-      expr = expr.replace(/(\d)([a-zA-Z(])/g, "$1*$2");
-      expr = expr.replace(/(\))([a-zA-Z0-9(])/g, "$1*$2");
-      const func = new Function("x", `"use strict"; return (${expr});`);
-      const res = Number(func(x));
-      return isFinite(res) ? res : null;
-    } catch {
-      return null;
-    }
+    const evaluator = compileMathFunction(fn);
+    return evaluator(x);
   }
 
   function drawGraph(ctx: CanvasRenderingContext2D, g: GraphObject) {
@@ -3642,9 +3667,10 @@ export function WhiteboardCanvas({
     ctx.beginPath();
     let started = false;
 
+    const evalFn = compileMathFunction(fn);
     for (let i = 0; i <= samples; i++) {
       const curX = xMin + (i / samples) * (xMax - xMin);
-      const curY = evaluateMathFunction(fn, curX);
+      const curY = evalFn(curX);
       if (curY !== null && !isNaN(curY)) {
         const sx = toScreenX(curX);
         const sy = toScreenY(curY);

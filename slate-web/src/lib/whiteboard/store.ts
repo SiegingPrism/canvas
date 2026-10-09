@@ -6,9 +6,16 @@ import {
   fetchBoardsFromSupabase,
   deleteBoardFromSupabase,
 } from "../supabase/dbService";
-
-const STORAGE_KEY = "whiteboard.multi.v1";
-const LEGACY_KEY = "whiteboard.v1";
+import {
+  saveBoardDataAsync,
+  saveMetaAsync,
+  deleteBoardFromStorage,
+  loadInitialSync,
+  loadFromStorage,
+  emptyFullPersist,
+  type FullPersistShape,
+  type BoardData,
+} from "./slateStorage";
 
 function uid() {
   return Math.random().toString(36).slice(2, 10);
@@ -40,65 +47,10 @@ export type RecentAI = {
   boardId: string | null;
   createdAt: number;
 };
-type BoardData = { pages: Page[]; activePageId: string };
-
-type PersistShape = {
-  boards: Record<string, BoardMeta>;
-  boardOrder: string[];
-  boardData: Record<string, BoardData>;
-  folders: Folder[];
-  recentAI: RecentAI[];
-};
+export type PersistShape = FullPersistShape;
 
 function emptyPersist(): PersistShape {
-  return { boards: {}, boardOrder: [], boardData: {}, folders: [], recentAI: [] };
-}
-
-function load(): PersistShape {
-  if (typeof window === "undefined") return emptyPersist();
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) return { ...emptyPersist(), ...JSON.parse(raw) };
-  } catch {
-    /* ignore */
-  }
-  try {
-    const legacy = localStorage.getItem(LEGACY_KEY);
-    if (legacy) {
-      const data = JSON.parse(legacy);
-      const id = uid();
-      const pages: Page[] = data.pages?.length ? data.pages : [emptyPage()];
-      const meta: BoardMeta = {
-        id,
-        title: "Untitled board",
-        tags: [],
-        folderId: null,
-        favorite: false,
-        archived: false,
-        createdAt: nowMs(),
-        updatedAt: nowMs(),
-      };
-      return {
-        boards: { [id]: meta },
-        boardOrder: [id],
-        boardData: { [id]: { pages, activePageId: data.activePageId ?? pages[0].id } },
-        folders: [],
-        recentAI: [],
-      };
-    }
-  } catch {
-    /* ignore */
-  }
-  return emptyPersist();
-}
-
-function savePersist(s: PersistShape) {
-  if (typeof window === "undefined") return;
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(s));
-  } catch {
-    /* ignore */
-  }
+  return emptyFullPersist();
 }
 
 type Actions = {
@@ -171,22 +123,25 @@ function triggerCloudSync(meta: BoardMeta, pages: Page[]) {
 
 function syncActive(state: State): State {
   if (!state.activeBoardId) return state;
+  const currentBoardData = { pages: state.pages, activePageId: state.activePageId };
   const boardData = {
     ...state.boardData,
-    [state.activeBoardId]: { pages: state.pages, activePageId: state.activePageId },
+    [state.activeBoardId]: currentBoardData,
   };
   const meta = state.boards[state.activeBoardId];
   const boards = meta
     ? { ...state.boards, [state.activeBoardId]: { ...meta, updatedAt: nowMs() } }
     : state.boards;
   const next = { ...state, boardData, boards };
-  savePersist({
+
+  saveBoardDataAsync(state.activeBoardId, currentBoardData);
+  saveMetaAsync({
     boards: next.boards,
     boardOrder: next.boardOrder,
-    boardData: next.boardData,
     folders: next.folders,
     recentAI: next.recentAI,
   });
+
   if (boards[state.activeBoardId]) {
     triggerCloudSync(boards[state.activeBoardId], state.pages);
   }
@@ -194,10 +149,12 @@ function syncActive(state: State): State {
 }
 
 function persistMeta(state: State) {
-  savePersist({
+  if (state.activeBoardId && state.boardData[state.activeBoardId]) {
+    saveBoardDataAsync(state.activeBoardId, state.boardData[state.activeBoardId]);
+  }
+  saveMetaAsync({
     boards: state.boards,
     boardOrder: state.boardOrder,
-    boardData: state.boardData,
     folders: state.folders,
     recentAI: state.recentAI,
   });
@@ -594,6 +551,7 @@ export const useWhiteboard = create<State & Actions>((set, get) => {
       const next: State = { ...s, boards, boardData, boardOrder, activeBoardId };
       persistMeta(next);
       set(next);
+      deleteBoardFromStorage(id);
       deleteBoardFromSupabase(id).catch(() => {});
     },
     duplicateBoard: (id) => {
@@ -752,15 +710,37 @@ export const useWhiteboard = create<State & Actions>((set, get) => {
 });
 
 if (typeof window !== "undefined") {
-  setTimeout(() => {
-    const loaded = load();
+  // 1. Initial fast load from synchronous store for instant rendering
+  const initial = loadInitialSync();
+  if (Object.keys(initial.boards).length > 0) {
     useWhiteboard.setState((prev) => ({
-      ...loaded,
+      ...initial,
       hydrated: true,
-      // Keep any active board if already set
       activeBoardId: prev.activeBoardId || null,
-      pages: prev.activeBoardId && prev.pages.length ? prev.pages : prev.pages || [emptyPage()],
+      pages:
+        prev.activeBoardId && initial.boardData[prev.activeBoardId]?.pages?.length
+          ? initial.boardData[prev.activeBoardId].pages
+          : prev.pages || [emptyPage()],
     }));
-    useWhiteboard.getState().syncWithCloud().catch(() => {});
-  }, 0);
+  }
+
+  // 2. Full load from IndexedDB with migration & quota protection
+  loadFromStorage()
+    .then((loaded) => {
+      useWhiteboard.setState((prev) => {
+        const activeId = prev.activeBoardId;
+        const activeData = activeId ? loaded.boardData[activeId] : null;
+        return {
+          ...loaded,
+          hydrated: true,
+          activeBoardId: activeId,
+          pages: activeData?.pages?.length ? activeData.pages : prev.pages || [emptyPage()],
+          activePageId: activeData?.activePageId || prev.activePageId,
+        };
+      });
+      useWhiteboard.getState().syncWithCloud().catch(() => {});
+    })
+    .catch((err) => {
+      console.warn("[Whiteboard] Storage hydration failure:", err);
+    });
 }

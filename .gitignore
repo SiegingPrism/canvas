@@ -35,3 +35,9 @@ temp_apk_res/
 .env
 .env.*
 *.env
+google-services.json
+**/google-services.json
+slate-web/android/.gradle/
+slate-web/android/build/
+slate-web/android/app/build/
+slate-web/android/local.properties

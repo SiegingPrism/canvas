@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { convertToModelMessages, streamText, type UIMessage } from "ai";
+import { convertToModelMessages, streamText, generateText, type UIMessage } from "ai";
 import { getAIModel } from "@/lib/ai-provider.server";
 
 export const Route = createFileRoute("/api/chat")({
@@ -13,6 +13,7 @@ export const Route = createFileRoute("/api/chat")({
             apiKey?: string;
             provider?: "gemini" | "openai" | "custom";
             baseURL?: string;
+            stream?: boolean;
           };
 
           if (!Array.isArray(body.messages)) {
@@ -34,11 +35,25 @@ export const Route = createFileRoute("/api/chat")({
             );
           }
 
+          const systemPrompt =
+            body.system ??
+            "You are an intelligent educational whiteboard assistant. Provide clear, well-structured, formatted responses with headings, bullet points, formulas, and actionable practice steps.";
+
+          if (body.stream === false) {
+            const result = await generateText({
+              model: modelConfig.model,
+              system: systemPrompt,
+              messages: await convertToModelMessages(body.messages),
+            });
+            return new Response(JSON.stringify({ text: result.text }), {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+
           const result = streamText({
             model: modelConfig.model,
-            system:
-              body.system ??
-              "You are an intelligent educational whiteboard assistant. Provide clear, well-structured, formatted responses with headings, bullet points, formulas, and actionable practice steps.",
+            system: systemPrompt,
             messages: await convertToModelMessages(body.messages),
           });
 

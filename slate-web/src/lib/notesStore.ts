@@ -1,3 +1,4 @@
+import { toast } from "sonner";
 import { create } from "zustand";
 import {
   syncNoteToSupabase,
@@ -103,8 +104,12 @@ function saveStorage(notes: Record<string, Note>, noteOrder: string[]) {
   if (typeof window === "undefined") return;
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ notes, noteOrder }));
-  } catch {
-    /* ignore */
+  } catch (err) {
+    console.error("[NotesStore] Save failure:", err);
+    toast.error("Storage full! Unable to save note locally. Sync with Cloud to protect your notes.", {
+      id: "notes-storage-quota-error",
+      duration: 5000,
+    });
   }
 }
 

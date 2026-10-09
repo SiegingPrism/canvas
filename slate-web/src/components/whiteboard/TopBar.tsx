@@ -41,6 +41,7 @@ import jsPDF from "jspdf";
 import QRCode from "qrcode";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
+import { syncBoardToSupabase } from "@/lib/supabase/dbService";
 import { AISettingsDialog } from "@/components/ai/AISettingsDialog";
 import { DocumentViewerDialog } from "@/components/document/DocumentViewerDialog";
 import { MathFormulaDialog } from "./MathFormulaDialog";
@@ -93,6 +94,7 @@ export function TopBar({
   const fileRef = useRef<HTMLInputElement>(null);
   const [qrOpen, setQrOpen] = useState(false);
   const [qrData, setQrData] = useState<string>("");
+  const [qrUrl, setQrUrl] = useState<string>("");
   const [templateTab, setTemplateTab] = useState<"background" | "template">("background");
   const [templatePopoverOpen, setTemplatePopoverOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -215,11 +217,30 @@ export function TopBar({
 
   async function shareQR() {
     try {
-      const qr = await QRCode.toDataURL(window.location.href, { margin: 1, width: 320 });
+      const activeMeta = activeBoardId ? boards[activeBoardId] : null;
+      if (activeMeta) {
+        toast.loading("Syncing board to cloud for sharing...", { id: "share-qr" });
+        await syncBoardToSupabase(activeMeta, pages);
+        toast.success("Board synced to cloud!", { id: "share-qr" });
+      }
+
+      const publicAppOrigin = (import.meta.env.VITE_PUBLIC_APP_URL || "").trim().replace(/\/$/, "");
+      const isLocalOrApp =
+        window.location.hostname === "localhost" ||
+        window.location.hostname === "127.0.0.1" ||
+        window.location.protocol === "file:" ||
+        window.location.protocol === "capacitor:";
+
+      const targetOrigin = isLocalOrApp && publicAppOrigin ? publicAppOrigin : window.location.origin;
+      const targetUrl = activeBoardId ? `${targetOrigin}/board/${activeBoardId}` : window.location.href;
+
+      const qr = await QRCode.toDataURL(targetUrl, { margin: 1, width: 320 });
       setQrData(qr);
+      setQrUrl(targetUrl);
       setQrOpen(true);
-    } catch {
-      toast.error("Could not generate QR code");
+    } catch (err) {
+      console.error("QR generation failed:", err);
+      toast.error("Could not generate shareable QR code", { id: "share-qr" });
     }
   }
 
@@ -631,20 +652,44 @@ export function TopBar({
       />
 
       <Dialog open={qrOpen} onOpenChange={setQrOpen}>
-        <DialogContent className="max-w-xs">
+        <DialogContent className="max-w-sm">
           <DialogHeader>
-            <DialogTitle className="text-center text-sm">Scan to open board</DialogTitle>
+            <DialogTitle className="text-center text-sm font-semibold flex items-center justify-center gap-1.5">
+              <Cloud className="h-4 w-4 text-emerald-500" />
+              Scan to open board
+            </DialogTitle>
           </DialogHeader>
           {qrData && (
             <div className="flex flex-col items-center gap-3 pt-2">
-              <img
-                src={qrData}
-                alt="QR code"
-                className="rounded-lg border shadow-sm max-w-[200px]"
-              />
+              <div className="rounded-xl border bg-white p-2 shadow-sm">
+                <img
+                  src={qrData}
+                  alt="QR code"
+                  className="rounded-lg max-w-[210px] w-full aspect-square"
+                />
+              </div>
               <p className="text-[11px] text-muted-foreground text-center">
-                Scan with any phone or tablet to open this board link.
+                Scan with any phone or camera to open this live board. Synced to Supabase Cloud.
               </p>
+              {qrUrl && (
+                <div className="flex items-center gap-2 w-full pt-1">
+                  <input
+                    readOnly
+                    value={qrUrl}
+                    className="flex-1 text-xs px-2.5 py-1.5 rounded-lg border bg-muted/40 font-mono text-muted-foreground truncate select-all"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      navigator.clipboard.writeText(qrUrl);
+                      toast.success("Board link copied!");
+                    }}
+                    className="text-xs px-3 py-1.5 rounded-lg bg-primary text-primary-foreground font-medium hover:bg-primary/90 transition shrink-0"
+                  >
+                    Copy
+                  </button>
+                </div>
+              )}
             </div>
           )}
         </DialogContent>
