@@ -26,7 +26,10 @@ import {
   Cloud,
 } from "lucide-react";
 import { toast } from "sonner";
+import { cn } from "@/lib/utils";
 import { FeatureTourDialog } from "@/components/whiteboard/FeatureTourDialog";
+import { AuthDialog } from "@/components/auth/AuthDialog";
+import { useAuth } from "@/lib/supabase/authStore";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -64,6 +67,8 @@ function Dashboard() {
   } = useWhiteboard();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [tourOpen, setTourOpen] = useState(false);
+  const { user } = useAuth();
+  const [authOpen, setAuthOpen] = useState(false);
   const [activeFolderId, setActiveFolderId] = useState<string>("all");
   const [boardSearch, setBoardSearch] = useState("");
   const [newFolderOpen, setNewFolderOpen] = useState(false);
@@ -167,15 +172,20 @@ function Dashboard() {
             <button
               type="button"
               onClick={async () => {
-                toast.info("Syncing boards & notes with Supabase cloud...");
+                if (!user) {
+                  setAuthOpen(true);
+                  toast.info("Sign in to sync your boards privately to the cloud.");
+                  return;
+                }
+                toast.info("Syncing boards & notes with your cloud account...");
                 await syncWithCloud();
                 toast.success("Cloud database sync complete!");
               }}
               className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-sm font-medium text-muted-foreground hover:text-foreground hover:bg-accent transition"
-              title="Sync with Supabase Cloud Database"
+              title="Sync with Cloud"
             >
-              <Cloud className="h-4 w-4 text-emerald-500" />
-              <span className="hidden lg:inline text-xs">Cloud Sync</span>
+              <Cloud className={cn("h-4 w-4", user ? "text-emerald-500" : "text-blue-500")} />
+              <span className="hidden lg:inline text-xs">{user ? "Cloud Sync" : "Sign In / Sync"}</span>
             </button>
             <Button size="sm" onClick={() => openNew()} className="ml-1">
               <Plus className="h-4 w-4" /> New board
@@ -678,6 +688,7 @@ function Dashboard() {
       </main>
 
       <FeatureTourDialog open={tourOpen} onOpenChange={setTourOpen} />
+      <AuthDialog open={authOpen} onOpenChange={setAuthOpen} />
     </div>
   );
 }

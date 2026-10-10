@@ -8,7 +8,9 @@ import {
 } from "@/components/ui/dialog";
 import { Sigma, Sparkles, Calculator, LineChart, Check } from "lucide-react";
 import { useWhiteboard } from "@/lib/whiteboard/store";
-import { AIEngine } from "@/lib/ai/aiEngine";
+import { AIEngine, aiErrorMessage } from "@/lib/ai/aiEngine";
+import { renderMathSolutionCard } from "@/lib/whiteboard/renderMathSolutionImage";
+import { formatLatexForDisplay } from "@/lib/whiteboard/mathTypesetting";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 
@@ -93,50 +95,45 @@ export function MathFormulaDialog({
     try {
       const clean = latex.trim();
       const res = await AIEngine.solveMath(clean);
+      if (!res) {
+        toast.error("Could not solve formula. Please check the mathematical expression.");
+        return;
+      }
 
       const screenW = typeof window !== "undefined" ? window.innerWidth : 400;
       const screenH = typeof window !== "undefined" ? window.innerHeight : 600;
-      const formulaW = Math.max(280, Math.min(460, clean.length * 8 + 60));
-      const formulaH = 110;
-      const cx = (screenW / 2 - camera.x) / camera.zoom - formulaW / 2;
-      const cy = (screenH / 2 - camera.y) / camera.zoom - formulaH / 2 - 50;
-      const formulaId = uid();
+      const cardW = 480;
+      const cx = (screenW / 2 - camera.x) / camera.zoom - cardW / 2;
+      const cy = (screenH / 2 - camera.y) / camera.zoom - 180;
 
-      // 1. Clean formula card
+      // Render clean, pedagogical step-by-step solution card image
+      const solutionCard = renderMathSolutionCard({
+        problemLatex: clean,
+        solution: res.solution,
+        steps: res.steps || [],
+        title: res.title || label.trim(),
+        graphableFn: res.graphableFn,
+        xRange: res.xRange,
+        yRange: res.yRange,
+      });
+
+      const solutionImageId = uid();
       addObject({
-        id: formulaId,
-        kind: "formula",
+        id: solutionImageId,
+        kind: "image",
+        src: solutionCard.dataUrl,
         x: cx,
         y: cy,
-        w: formulaW,
-        h: formulaH,
-        latex: res.latex || clean,
-        label: res.title || label.trim() || "SOLVED",
+        w: solutionCard.width,
+        h: solutionCard.height,
       });
 
-      // 2. Step-by-step solution sticky note
-      const stepsText =
-        `📐 SOLUTION: ${res.solution}\n\n` +
-        (res.steps?.length
-          ? res.steps.map((s) => `• ${s}`).join("\n")
-          : "Verified algebraic solution.");
-      addObject({
-        id: uid(),
-        kind: "sticky",
-        x: cx,
-        y: cy + 124,
-        w: 300,
-        h: Math.min(260, Math.max(140, (res.steps?.length || 2) * 28 + 60)),
-        text: stepsText,
-        color: "#fef9c3",
-      });
-
-      // 3. Interactive 2D Graph if plottable
+      // Interactive 2D Graph if plottable
       if (res.graphableFn) {
         addObject({
           id: uid(),
           kind: "graph",
-          x: cx + formulaW + 20,
+          x: cx + solutionCard.width + 24,
           y: cy,
           w: 320,
           h: 234,
@@ -157,24 +154,14 @@ export function MathFormulaDialog({
       onOpenChange(false);
     } catch (e) {
       console.error(e);
-      toast.error("Failed to solve formula");
+      toast.error(aiErrorMessage(e, "Failed to solve formula"));
     } finally {
       setIsSolving(false);
     }
   }
 
   // Prettify LaTeX for preview display
-  const previewText = latex
-    .replace(/\\frac\{([^}]+)\}\{([^}]+)\}/g, "($1 / $2)")
-    .replace(/\\sqrt\{([^}]+)\}/g, "√($1)")
-    .replace(/\\pm/g, "±")
-    .replace(/\\cdot/g, "·")
-    .replace(/\\pi/g, "π")
-    .replace(/\\int/g, "∫")
-    .replace(/\\infty/g, "∞")
-    .replace(/\\partial/g, "∂")
-    .replace(/\\sum/g, "∑")
-    .replace(/\\left|\\right/g, "");
+  const previewText = formatLatexForDisplay(latex);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>

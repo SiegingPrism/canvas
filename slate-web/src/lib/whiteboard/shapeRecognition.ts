@@ -106,7 +106,7 @@ function rdp(points: Point[], epsilon: number): Point[] {
 }
 
 // ---- Sharp Corner Detection ----
-function countCorners(points: Point[]): { count: number; corners: Point[] } {
+function countCorners(points: Point[], isClosed = false): { count: number; corners: Point[] } {
   if (points.length < 9) return { count: 0, corners: [] };
   const step = Math.max(2, Math.floor(points.length / 24));
   const corners: Point[] = [];
@@ -135,6 +135,31 @@ function countCorners(points: Point[]): { count: number; corners: Point[] } {
       if (isLocalMax) corners.push(pCur);
     }
   }
+
+  // Check closure corner where the stroke starts and ends
+  if (isClosed && points.length >= step * 2) {
+    const pStart = points[0];
+    const pNext = points[step];
+    const pPrev = points[points.length - 1 - step];
+
+    const v1 = { x: pPrev.x - pStart.x, y: pPrev.y - pStart.y };
+    const v2 = { x: pNext.x - pStart.x, y: pNext.y - pStart.y };
+    const mag1 = Math.hypot(v1.x, v1.y);
+    const mag2 = Math.hypot(v2.x, v2.y);
+    if (mag1 >= 1e-4 && mag2 >= 1e-4) {
+      const dot = (v1.x * v2.x + v1.y * v2.y) / (mag1 * mag2);
+      const angle = Math.acos(Math.max(-1, Math.min(1, dot)));
+      if (angle < Math.PI - minAngleThresh) {
+        const isFarFromExisting = corners.every(
+          (c) => Math.hypot(pStart.x - c.x, pStart.y - c.y) > 16
+        );
+        if (isFarFromExisting) {
+          corners.unshift(pStart);
+        }
+      }
+    }
+  }
+
   return { count: corners.length, corners };
 }
 
@@ -203,7 +228,7 @@ export function recognizeShape(
   // ----------------------------------------------------
   // CLOSED STROKES: Feature Extraction
   // ----------------------------------------------------
-  const { count: corners, corners: cornerPts } = countCorners(points);
+  const { count: corners, corners: cornerPts } = countCorners(points, isClosed);
 
   // RDP simplified vertices
   const rdpVertices = rdp(points, Math.max(6, maxSpan * 0.045));
@@ -342,8 +367,28 @@ export function recognizeShape(
     rdpCount === 3 ||
     (cornerElongation > 1.95 && normRectDev > 0.06 && ellipseDev > 0.2)
   ) {
+    // Resolve 3 vertices first
+    let triVertices: Point[] | undefined = cornerPts.length === 3 ? cornerPts : undefined;
+    if (!triVertices) {
+      for (const eps of [0.04, 0.08, 0.12, 0.16, 0.2, 0.25]) {
+        const r = rdp(points, Math.max(6, maxSpan * eps));
+        const unique = r.slice(0, -1);
+        if (unique.length === 3) {
+          triVertices = unique;
+          break;
+        }
+      }
+    }
+
     // Check if right-angled (one corner has ~90° angle)
-    const isRight = detectRightAngleTriangle(cornerPts, points, minX, maxX, minY, maxY);
+    const isRight = detectRightAngleTriangle(triVertices, points, minX, maxX, minY, maxY);
+
+    // Store vertices relative to the bounding box (0..1) so triangle can be moved and resized cleanly
+    const relVertices = triVertices?.map((p) => ({
+      x: w > 0 ? (p.x - minX) / w : 0.5,
+      y: h > 0 ? (p.y - minY) / h : 0.5,
+    }));
+
     return {
       kind: "shape",
       shape: isRight ? "right-triangle" : "triangle",
@@ -353,6 +398,7 @@ export function recognizeShape(
       y: minY,
       w,
       h,
+      vertices: relVertices,
     };
   }
 
@@ -375,58 +421,85 @@ export function recognizeShape(
   }
 
   // ----------------------------------------------------
-  // H. Check PENTAGON (5 vertices, high solidity)
-  // ----------------------------------------------------
-  if ((rdpCount === 5 || corners === 5) && solidity > 0.85) {
-    const diam = Math.max(w, h);
+  // H. Check RECTANGLE / SQUARE (Checked before pentagon/hexagon to prevent 5-point closed strokes becoming pentagons)
+  const fivePoints =
+    rdpVertices.length >= 6
+      ? rdpVertices.slice(0, 5)
+      : cornerPts.length === 5
+        ? cornerPts
+        : [];
+  const isPentagon =
+    (rdpCount === 5 || corners === 5) &&
+    (isPentagonLike(fivePoints) || (solidity > 0.85 && normRectDev >= 0.09 && !isRectangleAngles(fivePoints)));
+
+  const isRectangle =
+    !isPentagon &&
+    ((normRectDev < 0.08 && cornerElongation > 1.2 && corners <= 4) ||
+      (corners === 4 && normRectDev < 0.13) ||
+      (rdpCount === 4 && normRectDev < 0.13) ||
+      ((corners === 5 || rdpCount === 5) && normRectDev < 0.10 && isRectangleAngles(fivePoints)) ||
+      (aspect < 0.45 && normRectDev < 0.15) ||
+      (aspect > 2.2 && normRectDev < 0.15));
+
+  if (isRectangle) {
+    const isSquare = aspect >= 0.82 && aspect <= 1.22;
+    let finalW = isSquare ? Math.max(w, h) : w;
+    let finalH = isSquare ? Math.max(w, h) : h;
+    let finalX = isSquare ? cx - finalW / 2 : minX;
+    let finalY = isSquare ? cy - finalH / 2 : minY;
+
+    let rotation: number | undefined;
+    if (cornerPts.length === 4) {
+      const angle = Math.atan2(cornerPts[1].y - cornerPts[0].y, cornerPts[1].x - cornerPts[0].x);
+      // Mathematical positive modulo in JavaScript
+      const mod = (n: number, m: number) => ((n % m) + m) % m;
+      let normA = mod(angle + Math.PI / 4, Math.PI / 2) - Math.PI / 4;
+
+      if (Math.abs(normA) > 0.08) {
+        rotation = normA;
+
+        // Project stroke points along rotated principal axes to compute unrotated width and height
+        const cosA = Math.cos(-normA);
+        const sinA = Math.sin(-normA);
+        let rotMinX = Infinity;
+        let rotMaxX = -Infinity;
+        let rotMinY = Infinity;
+        let rotMaxY = -Infinity;
+        for (const p of points) {
+          const dx = p.x - cx;
+          const dy = p.y - cy;
+          const rx = dx * cosA - dy * sinA;
+          const ry = dx * sinA + dy * cosA;
+          if (rx < rotMinX) rotMinX = rx;
+          if (rx > rotMaxX) rotMaxX = rx;
+          if (ry < rotMinY) rotMinY = ry;
+          if (ry > rotMaxY) rotMaxY = ry;
+        }
+
+        const spanW = Math.max(10, rotMaxX - rotMinX);
+        const spanH = Math.max(10, rotMaxY - rotMinY);
+        finalW = isSquare ? Math.max(spanW, spanH) : spanW;
+        finalH = isSquare ? Math.max(spanW, spanH) : spanH;
+        finalX = cx - finalW / 2;
+        finalY = cy - finalH / 2;
+      }
+    }
+
     return {
       kind: "shape",
-      shape: "pentagon",
+      shape: "rect",
       color,
       size,
-      x: cx - diam / 2,
-      y: cy - diam / 2,
-      w: diam,
-      h: diam,
+      x: finalX,
+      y: finalY,
+      w: finalW,
+      h: finalH,
+      rotation,
     };
   }
 
   // ----------------------------------------------------
-  // I. Check HEXAGON (6 vertices, high solidity)
-  // ----------------------------------------------------
-  if ((rdpCount === 6 || corners === 6) && solidity > 0.86) {
-    const diam = Math.max(w, h);
-    return {
-      kind: "shape",
-      shape: "hexagon",
-      color,
-      size,
-      x: cx - diam / 2,
-      y: cy - diam / 2,
-      w: diam,
-      h: diam,
-    };
-  }
-
-  // ----------------------------------------------------
-  // J. Check OCTAGON (8 vertices, high solidity)
-  // ----------------------------------------------------
-  if ((rdpCount === 8 || corners === 8) && solidity > 0.88) {
-    const diam = Math.max(w, h);
-    return {
-      kind: "shape",
-      shape: "octagon",
-      color,
-      size,
-      x: cx - diam / 2,
-      y: cy - diam / 2,
-      w: diam,
-      h: diam,
-    };
-  }
-
-  // ----------------------------------------------------
-  // K. Check PARALLELOGRAM & TRAPEZOID
+  // I. Check PARALLELOGRAM & TRAPEZOID
   // ----------------------------------------------------
   if (corners === 4 || rdpCount === 4) {
     const polyType = detectQuadType(points, minX, maxX, minY, maxY, w, h);
@@ -445,28 +518,53 @@ export function recognizeShape(
   }
 
   // ----------------------------------------------------
-  // L. Check RECTANGLE / SQUARE
+  // J. Check PENTAGON (5 vertices, high solidity, but distinct from rectangle)
   // ----------------------------------------------------
-  const isRectangle =
-    (normRectDev < 0.08 && cornerElongation > 1.25) ||
-    (corners >= 4 && normRectDev < 0.12) ||
-    (rdpCount === 4 && normRectDev < 0.13) ||
-    (aspect < 0.45 && normRectDev < 0.15) ||
-    (aspect > 2.2 && normRectDev < 0.15);
-
-  if (isRectangle) {
-    const isSquare = aspect >= 0.82 && aspect <= 1.22;
-    const finalW = isSquare ? Math.max(w, h) : w;
-    const finalH = isSquare ? Math.max(w, h) : h;
+  if (isPentagon || ((rdpCount === 5 || corners === 5) && solidity > 0.85 && normRectDev >= 0.09)) {
+    const diam = Math.max(w, h);
     return {
       kind: "shape",
-      shape: "rect",
+      shape: "pentagon",
       color,
       size,
-      x: isSquare ? cx - finalW / 2 : minX,
-      y: isSquare ? cy - finalH / 2 : minY,
-      w: finalW,
-      h: finalH,
+      x: cx - diam / 2,
+      y: cy - diam / 2,
+      w: diam,
+      h: diam,
+    };
+  }
+
+  // ----------------------------------------------------
+  // K. Check HEXAGON (6 vertices, high solidity)
+  // ----------------------------------------------------
+  if ((rdpCount === 6 || corners === 6) && solidity > 0.86) {
+    const diam = Math.max(w, h);
+    return {
+      kind: "shape",
+      shape: "hexagon",
+      color,
+      size,
+      x: cx - diam / 2,
+      y: cy - diam / 2,
+      w: diam,
+      h: diam,
+    };
+  }
+
+  // ----------------------------------------------------
+  // L. Check OCTAGON (8 vertices, high solidity)
+  // ----------------------------------------------------
+  if ((rdpCount === 8 || corners === 8) && solidity > 0.88) {
+    const diam = Math.max(w, h);
+    return {
+      kind: "shape",
+      shape: "octagon",
+      color,
+      size,
+      x: cx - diam / 2,
+      y: cy - diam / 2,
+      w: diam,
+      h: diam,
     };
   }
 
@@ -615,24 +713,71 @@ function detectCross(
   return armsFound >= 3;
 }
 
+function isRectangleAngles(vertices: Point[]): boolean {
+  if (vertices.length < 4) return false;
+  let rightAngleCount = 0;
+  for (let i = 0; i < vertices.length; i++) {
+    const p1 = vertices[(i + vertices.length - 1) % vertices.length];
+    const p2 = vertices[i];
+    const p3 = vertices[(i + 1) % vertices.length];
+    const ang = interiorAngle(p1, p2, p3);
+    if (ang >= 75 && ang <= 105) rightAngleCount++;
+  }
+  return rightAngleCount >= 3;
+}
+
+function isPentagonLike(vertices: Point[]): boolean {
+  if (vertices.length !== 5) return false;
+  let rightAngleCount = 0;
+  let pentagonAngleCount = 0;
+  for (let i = 0; i < 5; i++) {
+    const p1 = vertices[(i + 4) % 5];
+    const p2 = vertices[i];
+    const p3 = vertices[(i + 1) % 5];
+    const ang = interiorAngle(p1, p2, p3);
+    if (ang >= 75 && ang <= 105) rightAngleCount++;
+    if (ang >= 95 && ang <= 125) pentagonAngleCount++;
+  }
+  if (rightAngleCount >= 3) return false;
+  return pentagonAngleCount >= 3;
+}
+
 function detectRightAngleTriangle(
-  cornerPts: Point[],
+  triVertices: Point[] | undefined,
   allPts: Point[],
   minX: number,
   maxX: number,
   minY: number,
   maxY: number,
 ): boolean {
-  // If we have 3 corner points, test for ~90° angle
-  if (cornerPts.length === 3) {
-    const [A, B, C] = cornerPts;
+  // If we have 3 corner points, test for ~90° angle (78° to 102°)
+  if (triVertices && triVertices.length === 3) {
+    const [A, B, C] = triVertices;
     const angles = [interiorAngle(B, A, C), interiorAngle(A, B, C), interiorAngle(A, C, B)];
-    if (angles.some((a) => a >= 76 && a <= 104)) return true;
+    const hasRightAngle = angles.some((a) => a >= 78 && a <= 102);
+    if (!hasRightAngle) {
+      return false;
+    }
+    return true;
   }
-  // Check if two edges align with horizontal and vertical axes
-  const nearCorner = allPts.some((p) => Math.abs(p.x - minX) < 12 && Math.abs(p.y - maxY) < 12);
-  const nearTopLeft = allPts.some((p) => Math.abs(p.x - minX) < 12 && Math.abs(p.y - minY) < 12);
-  return nearCorner || nearTopLeft;
+
+  // Fallback: Check if the shape aligns with an axis-aligned right triangle.
+  // An axis-aligned right triangle occupies 3 corners of its bounding box, leaving 1 empty.
+  // Symmetrical upright or inverted triangles only occupy 2 corners (the base corners),
+  // with their apex near the center of an edge.
+  const w = maxX - minX;
+  const h = maxY - minY;
+  if (w <= 0 || h <= 0) return false;
+
+  const threshold = 0.18;
+  const occupiedCorners = [
+    allPts.some((p) => p.x <= minX + w * threshold && p.y <= minY + h * threshold), // top-left
+    allPts.some((p) => p.x >= maxX - w * threshold && p.y <= minY + h * threshold), // top-right
+    allPts.some((p) => p.x >= maxX - w * threshold && p.y >= maxY - h * threshold), // bottom-right
+    allPts.some((p) => p.x <= minX + w * threshold && p.y >= maxY - h * threshold), // bottom-left
+  ];
+
+  return occupiedCorners.filter(Boolean).length === 3;
 }
 
 function interiorAngle(p1: Point, p2: Point, p3: Point): number {
@@ -742,12 +887,21 @@ function detectArrow(points: Point[], color: string, size: number): Omit<ShapeSt
   const n = points.length;
   const tip = points[n - 1];
 
+  let strokeLen = 0;
+  for (let i = 1; i < n; i++) {
+    strokeLen += Math.hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y);
+  }
+  if (strokeLen < 16) return null;
+
+  const minBarb = Math.max(8, strokeLen * 0.04);
+  const maxBarb = Math.min(Math.max(28, strokeLen * 0.42), 140);
+
   let barbFound = false;
   let barbIndex = -1;
 
-  for (let i = n - 2; i >= Math.max(2, n - 18); i--) {
+  for (let i = n - 2; i >= Math.max(2, n - 25); i--) {
     const d = Math.hypot(points[i].x - tip.x, points[i].y - tip.y);
-    if (d > 14 && d < 65) {
+    if (d >= minBarb && d <= maxBarb) {
       const vBarb = { x: points[i].x - tip.x, y: points[i].y - tip.y };
       const vShaft = { x: points[0].x - tip.x, y: points[0].y - tip.y };
       const dot =

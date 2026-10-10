@@ -20,6 +20,9 @@ import {
   Cloud,
 } from "lucide-react";
 import { toast } from "sonner";
+import { cn } from "@/lib/utils";
+import { AuthDialog } from "@/components/auth/AuthDialog";
+import { useAuth } from "@/lib/supabase/authStore";
 import { semanticSearch } from "@/lib/ai/localRAG";
 
 export const Route = createFileRoute("/notes")({
@@ -57,6 +60,8 @@ function NotesPage() {
     syncWithCloud,
   } = useNotes();
 
+  const { user } = useAuth();
+  const [authOpen, setAuthOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [useSemanticSearch, setUseSemanticSearch] = useState(false);
   const [filter, setFilter] = useState<"all" | "favorites" | "archived">("all");
@@ -126,14 +131,19 @@ function NotesPage() {
               size="sm"
               variant="outline"
               onClick={async () => {
-                toast.info("Syncing notes with Supabase cloud...");
+                if (!user) {
+                  setAuthOpen(true);
+                  toast.info("Sign in to sync your notes privately to the cloud.");
+                  return;
+                }
+                toast.info("Syncing notes with your cloud account...");
                 await syncWithCloud();
                 toast.success("Notes synced with cloud database!");
               }}
               className="gap-1.5"
             >
-              <Cloud className="h-4 w-4 text-emerald-500" />
-              <span>Cloud Sync</span>
+              <Cloud className={cn("h-4 w-4", user ? "text-emerald-500" : "text-blue-500")} />
+              <span>{user ? "Cloud Sync" : "Sign In & Sync"}</span>
             </Button>
             <Button size="sm" onClick={handleNewNote}>
               <Plus className="h-4 w-4" /> New note
@@ -346,6 +356,8 @@ function NotesPage() {
           </div>
         )}
       </main>
+
+      <AuthDialog open={authOpen} onOpenChange={setAuthOpen} />
     </div>
   );
 }

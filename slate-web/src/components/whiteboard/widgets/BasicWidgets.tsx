@@ -15,7 +15,7 @@ import {
 import { useWhiteboard } from "@/lib/whiteboard/store";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
-import { AIEngine } from "@/lib/ai/aiEngine";
+import { AIEngine, aiErrorMessage } from "@/lib/ai/aiEngine";
 import { compileMathFunction } from "@/lib/whiteboard/safeMath";
 
 export function TimerWidget() {
@@ -378,7 +378,7 @@ export function VoiceNoteWidget() {
     try {
       const cx = (window.innerWidth / 2 - camera.x) / camera.zoom;
       const cy = (window.innerHeight / 2 - camera.y) / camera.zoom;
-      const tree = await AIEngine.generateMindMap(fullText.slice(0, 100), cx, cy);
+      const tree = await AIEngine.generateMindMap(fullText.slice(0, 1500), cx, cy);
       pushHistory();
       function addNodes(node: typeof tree) {
         addObject({
@@ -397,8 +397,8 @@ export function VoiceNoteWidget() {
       }
       addNodes(tree);
       toast.success("AI Mind-Map generated from your speech!");
-    } catch {
-      toast.error("Could not generate mind map");
+    } catch (err) {
+      toast.error(aiErrorMessage(err, "Could not generate mind map"));
     }
   };
 

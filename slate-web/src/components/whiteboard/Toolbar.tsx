@@ -59,6 +59,7 @@ import {
   EyeOff,
   MonitorPlay,
   Sigma,
+  Bot,
 } from "lucide-react";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
@@ -849,6 +850,19 @@ export function Toolbar() {
           title="Solve Written Math on Board (Calculates handwriting & inserts answer directly)"
         >
           <Sparkles className="h-4 w-4 text-amber-500 hover:text-amber-600 transition-colors" />
+        </button>
+
+        {/* 11. AI Whiteboard Copilot & Assistant */}
+        <button
+          type="button"
+          onClick={() => {
+            setActiveFlyout(null);
+            window.dispatchEvent(new CustomEvent("slate:open-ai"));
+          }}
+          className={btnClass(false)}
+          title="AI Whiteboard Copilot & Lesson Assistant"
+        >
+          <Bot className="h-4 w-4 text-indigo-500 hover:text-indigo-600 transition-colors" />
         </button>
 
         {/* 11. Widgets & Classroom Tools */}

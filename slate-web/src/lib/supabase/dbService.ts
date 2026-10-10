@@ -27,6 +27,17 @@ export interface CloudNoteRecord {
   updated_at?: string;
 }
 
+async function getAuthUserId(): Promise<string | null> {
+  const supabase = getSupabase();
+  if (!supabase) return null;
+  try {
+    const { data } = await supabase.auth.getSession();
+    return data.session?.user?.id ?? null;
+  } catch {
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // BOARDS CRUD
 // ---------------------------------------------------------------------------
@@ -34,13 +45,20 @@ export interface CloudNoteRecord {
 export async function syncBoardToSupabase(
   meta: BoardMeta,
   pages: Page[] = [],
-  thumbnail?: string
+  thumbnail?: string,
+  isPublicShare = false
 ): Promise<boolean> {
   const supabase = getSupabase();
   if (!supabase) return false;
 
+  // Cloud sync requires sign-in to protect user data from being public
+  const userId = await getAuthUserId();
+  if (!userId && !isPublicShare) {
+    return false;
+  }
+
   try {
-    const payload = {
+    const payload: any = {
       id: meta.id,
       title: meta.title || "Untitled Board",
       folder_id: meta.folderId,
@@ -50,6 +68,10 @@ export async function syncBoardToSupabase(
       pages: pages,
       updated_at: new Date().toISOString(),
     };
+
+    if (userId) {
+      payload.user_id = userId;
+    }
 
     const { error } = await supabase.from("boards").upsert(payload, { onConflict: "id" });
     if (error) {
@@ -67,10 +89,15 @@ export async function fetchBoardsFromSupabase(): Promise<CloudBoardRecord[]> {
   const supabase = getSupabase();
   if (!supabase) return [];
 
+  // Without sign-in, do not pull other users' data
+  const userId = await getAuthUserId();
+  if (!userId) return [];
+
   try {
     const { data, error } = await supabase
       .from("boards")
       .select("*")
+      .eq("user_id", userId)
       .order("updated_at", { ascending: false });
 
     if (error) {
@@ -104,8 +131,15 @@ export async function deleteBoardFromSupabase(boardId: string): Promise<boolean>
   const supabase = getSupabase();
   if (!supabase) return false;
 
+  const userId = await getAuthUserId();
+  if (!userId) return false;
+
   try {
-    const { error } = await supabase.from("boards").delete().eq("id", boardId);
+    const { error } = await supabase
+      .from("boards")
+      .delete()
+      .eq("id", boardId)
+      .eq("user_id", userId);
     if (error) {
       console.warn("Supabase deleteBoard warning:", error.message);
       return false;
@@ -125,14 +159,18 @@ export async function syncNoteToSupabase(note: Note): Promise<boolean> {
   const supabase = getSupabase();
   if (!supabase) return false;
 
+  const userId = await getAuthUserId();
+  if (!userId) return false;
+
   try {
     const textContent = note.blocks
       ?.map((b) => b.content || "")
       .join("\n")
       .trim();
 
-    const payload = {
+    const payload: any = {
       id: note.id,
+      user_id: userId,
       title: note.title || "Untitled Note",
       content: textContent || "",
       blocks: note.blocks || [],
@@ -155,10 +193,14 @@ export async function fetchNotesFromSupabase(): Promise<CloudNoteRecord[]> {
   const supabase = getSupabase();
   if (!supabase) return [];
 
+  const userId = await getAuthUserId();
+  if (!userId) return [];
+
   try {
     const { data, error } = await supabase
       .from("notes")
       .select("*")
+      .eq("user_id", userId)
       .order("updated_at", { ascending: false });
 
     if (error) {
@@ -192,8 +234,15 @@ export async function deleteNoteFromSupabase(noteId: string): Promise<boolean> {
   const supabase = getSupabase();
   if (!supabase) return false;
 
+  const userId = await getAuthUserId();
+  if (!userId) return false;
+
   try {
-    const { error } = await supabase.from("notes").delete().eq("id", noteId);
+    const { error } = await supabase
+      .from("notes")
+      .delete()
+      .eq("id", noteId)
+      .eq("user_id", userId);
     if (error) {
       console.warn("Supabase deleteNote warning:", error.message);
       return false;
@@ -218,9 +267,13 @@ export async function syncStudyDeckToSupabase(
   const supabase = getSupabase();
   if (!supabase) return false;
 
+  const userId = await getAuthUserId();
+  if (!userId) return false;
+
   try {
     const payload = {
       id: deckId,
+      user_id: userId,
       title: title || "Study Deck",
       cards,
       quizzes,
@@ -243,10 +296,14 @@ export async function fetchStudyDecksFromSupabase(): Promise<any[]> {
   const supabase = getSupabase();
   if (!supabase) return [];
 
+  const userId = await getAuthUserId();
+  if (!userId) return [];
+
   try {
     const { data, error } = await supabase
       .from("study_decks")
       .select("*")
+      .eq("user_id", userId)
       .order("updated_at", { ascending: false });
 
     if (error) {

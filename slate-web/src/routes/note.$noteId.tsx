@@ -32,7 +32,7 @@ import {
   PenTool,
 } from "lucide-react";
 import { toast } from "sonner";
-import { AIEngine } from "@/lib/ai/aiEngine";
+import { AIEngine, aiErrorMessage } from "@/lib/ai/aiEngine";
 import { useWhiteboard } from "@/lib/whiteboard/store";
 import type { CanvasObject } from "@/lib/whiteboard/types";
 
@@ -227,7 +227,7 @@ export function NoteEditorPage() {
       toast.success("AI Summary added directly to your note!");
     } catch (e) {
       console.error(e);
-      toast.error("Summarization failed");
+      toast.error(aiErrorMessage(e, "Summarization failed"));
     } finally {
       setAiLoading(false);
     }
@@ -281,7 +281,7 @@ export function NoteEditorPage() {
       toast.success(`Generated ${questions.length} quiz questions!`);
     } catch (e) {
       console.error(e);
-      toast.error("Quiz generation failed");
+      toast.error(aiErrorMessage(e, "Quiz generation failed"));
     } finally {
       setAiLoading(false);
     }
@@ -333,7 +333,7 @@ export function NoteEditorPage() {
       toast.success(`Generated ${cards.length} flashcards!`);
     } catch (e) {
       console.error(e);
-      toast.error("Flashcard generation failed");
+      toast.error(aiErrorMessage(e, "Flashcard generation failed"));
     } finally {
       setAiLoading(false);
     }
@@ -379,7 +379,7 @@ export function NoteEditorPage() {
       });
     } catch (e) {
       console.error(e);
-      toast.error("Mind map generation failed");
+      toast.error(aiErrorMessage(e, "Mind map generation failed"));
     } finally {
       setAiLoading(false);
     }

@@ -68,6 +68,7 @@ type Actions = {
   setCamera: (c: { x: number; y: number; zoom: number }) => void;
   // Active board content
   addObject: (obj: CanvasObject) => void;
+  setObjects: (objects: CanvasObject[]) => void;
   addObjectsToBoard: (boardId: string, objects: CanvasObject[]) => void;
   updateObject: (id: string, patch: Partial<CanvasObject>) => void;
   deleteObject: (id: string) => void;
@@ -359,6 +360,13 @@ export const useWhiteboard = create<State & Actions>((set, get) => {
         triggerCloudSync(boards[boardId], pages);
       }
     },
+    setObjects: (objects: CanvasObject[]) => {
+      const s = get();
+      const pages = s.pages.map((p) =>
+        p.id === s.activePageId ? { ...p, objects } : p
+      );
+      set(syncActive({ ...s, pages }));
+    },
     updateObject: (id, patch) => {
       const s = get();
       const pages = s.pages.map((p) =>
@@ -536,11 +544,35 @@ export const useWhiteboard = create<State & Actions>((set, get) => {
     },
     openBoard: (id) => {
       const s = get();
-      const bd = s.boardData[id];
-      if (!bd) return;
-      // sync outgoing
+      let bd = s.boardData[id];
       let boardData = s.boardData;
       let boards = s.boards;
+
+      if (!bd || !Array.isArray(bd.pages) || bd.pages.length === 0) {
+        if (!boards[id]) {
+          boards = {
+            ...boards,
+            [id]: {
+              id,
+              title: "Untitled board",
+              tags: [],
+              folderId: null,
+              favorite: false,
+              archived: false,
+              createdAt: nowMs(),
+              updatedAt: nowMs(),
+            },
+          };
+        }
+        const newPages = [emptyPage()];
+        bd = { pages: newPages, activePageId: newPages[0].id };
+        boardData = { ...boardData, [id]: bd };
+      }
+
+      const safePages = Array.isArray(bd.pages) && bd.pages.length > 0 ? bd.pages : [emptyPage()];
+      const safeActivePageId = bd.activePageId || safePages[0].id;
+
+      // sync outgoing
       if (s.activeBoardId && s.boards[s.activeBoardId]) {
         boardData = {
           ...boardData,
@@ -556,9 +588,9 @@ export const useWhiteboard = create<State & Actions>((set, get) => {
         boardData,
         boards,
         activeBoardId: id,
-        pages: bd.pages,
-        activePageId: bd.activePageId,
-        history: [structuredClone(bd.pages)],
+        pages: safePages,
+        activePageId: safeActivePageId,
+        history: [structuredClone(safePages)],
         historyIndex: 0,
         selectedId: null,
         camera: { x: 0, y: 0, zoom: 1 },
@@ -767,9 +799,18 @@ if (typeof window !== "undefined") {
     }));
   }
 
+  // Safeguard timeout: Never let hydration hang indefinitely
+  const hydrationTimer = setTimeout(() => {
+    if (!useWhiteboard.getState().hydrated) {
+      console.warn("[Whiteboard] Hydration timed out, forcing hydrated: true");
+      useWhiteboard.setState({ hydrated: true });
+    }
+  }, 2500);
+
   // 2. Full load from IndexedDB with migration & quota protection
   loadFromStorage()
     .then((loaded) => {
+      clearTimeout(hydrationTimer);
       useWhiteboard.setState((prev) => {
         const activeId = prev.activeBoardId;
         const activeData = activeId ? loaded.boardData[activeId] : null;
@@ -784,6 +825,7 @@ if (typeof window !== "undefined") {
       useWhiteboard.getState().syncWithCloud().catch(() => {});
     })
     .catch((err) => {
+      clearTimeout(hydrationTimer);
       console.warn("[Whiteboard] Storage hydration failure:", err);
       useWhiteboard.setState({ hydrated: true });
     });

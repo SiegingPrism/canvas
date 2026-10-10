@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { AIEngine } from "@/lib/ai/aiEngine";
+import { AIEngine, aiErrorMessage } from "@/lib/ai/aiEngine";
 import { useWhiteboard } from "@/lib/whiteboard/store";
 import { useNotes } from "@/lib/notesStore";
 import { useLearn } from "@/lib/learnStore";
@@ -17,6 +17,18 @@ import {
   CheckCircle,
 } from "lucide-react";
 import { toast } from "sonner";
+import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
+
+function decodeXmlEntities(text: string): string {
+  return text
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&#(\d+);/g, (_, num) => String.fromCharCode(parseInt(num, 10)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+}
 
 export function DocumentViewerDialog({
   open,
@@ -48,20 +60,94 @@ export function DocumentViewerDialog({
     setSummary(null);
 
     try {
-      if (f.type === "application/pdf" || f.name.endsWith(".pdf")) {
-        // Read text from PDF or raw binary text extraction
+      const lowerName = f.name.toLowerCase();
+      const isPdf = f.type === "application/pdf" || lowerName.endsWith(".pdf");
+      const isDocx = lowerName.endsWith(".docx");
+      const isPptx = lowerName.endsWith(".pptx");
+
+      if (lowerName.endsWith(".doc") || lowerName.endsWith(".ppt")) {
+        toast.error("Legacy .doc and .ppt binary formats are not supported. Please save as .docx or .pptx.");
+        setLoading(false);
+        setFile(null);
+        return;
+      }
+
+      if (isPdf) {
         const arrayBuffer = await f.arrayBuffer();
-        const decoder = new TextDecoder("utf-8");
-        const rawString = decoder.decode(arrayBuffer);
-        // Extract printable text chunks
-        const extracted = rawString
-          .replace(/[^\x20-\x7E\n]/g, " ")
-          .replace(/\s+/g, " ")
-          .slice(0, 5000);
-        setDocContent(extracted.trim() || `PDF Document: ${f.name}\nSize: ${Math.round(f.size / 1024)} KB`);
+        try {
+          const pdfjsLib = await import("pdfjs-dist");
+          pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
+          const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
+          const pdf = await loadingTask.promise;
+          let fullText = "";
+          const maxPages = Math.min(pdf.numPages, 100);
+          for (let pageNum = 1; pageNum <= maxPages; pageNum++) {
+            const page = await pdf.getPage(pageNum);
+            const textContent = await page.getTextContent();
+            const pageText = textContent.items
+              .map((item: any) => item.str || "")
+              .join(" ");
+            if (pageText.trim()) {
+              fullText += `--- Page ${pageNum} ---\n${pageText.trim()}\n\n`;
+            }
+          }
+          setDocContent(
+            fullText.trim() ||
+              `PDF Document: ${f.name}\n(Page text is scanned/image-based or contains no selectable text layer)`
+          );
+        } catch (pdfErr) {
+          console.warn("pdfjs-dist extraction failed:", pdfErr);
+          setDocContent(
+            `Could not read text from "${f.name}". The document may be password-protected or scanned images without a text layer.`
+          );
+          toast.error("Could not extract text from PDF.");
+        }
+      } else if (isDocx) {
+        const arrayBuffer = await f.arrayBuffer();
+        try {
+          const mammoth = await import("mammoth");
+          const res = await mammoth.extractRawText({ arrayBuffer });
+          setDocContent(res.value.trim() || `Document: ${f.name} (Empty)`);
+        } catch (docErr) {
+          console.warn("mammoth extraction fallback:", docErr);
+          toast.error("Failed to parse Word (.docx) document.");
+          setDocContent(`Could not read text from "${f.name}".`);
+        }
+      } else if (isPptx) {
+        const arrayBuffer = await f.arrayBuffer();
+        try {
+          const JSZip = (await import("jszip")).default;
+          const zip = await JSZip.loadAsync(arrayBuffer);
+          const slideFiles = Object.keys(zip.files)
+            .filter((name) => /^ppt\/slides\/slide\d+\.xml$/i.test(name))
+            .sort((a, b) => {
+              const numA = parseInt(a.replace(/\D/g, ""), 10) || 0;
+              const numB = parseInt(b.replace(/\D/g, ""), 10) || 0;
+              return numA - numB;
+            });
+
+          let fullPptText = "";
+          for (let i = 0; i < slideFiles.length; i++) {
+            const xml = await zip.files[slideFiles[i]].async("text");
+            const matches = Array.from(xml.matchAll(/<a:t[^>]*>(.*?)<\/a:t>/gi)).map(
+              (m) => decodeXmlEntities(m[1])
+            );
+            const slideText = matches.join(" ").trim();
+            if (slideText) {
+              fullPptText += `--- Slide ${i + 1} ---\n${slideText}\n\n`;
+            }
+          }
+          setDocContent(
+            fullPptText.trim() || `Presentation: ${f.name} (No slide text found)`
+          );
+        } catch (pptErr) {
+          console.warn("pptx extraction fallback:", pptErr);
+          toast.error("Failed to parse PowerPoint (.pptx) presentation.");
+          setDocContent(`Could not read slide text from "${f.name}".`);
+        }
       } else {
         const text = await f.text();
-        setDocContent(text.slice(0, 10000));
+        setDocContent(text.slice(0, 15000));
       }
       toast.success(`Loaded "${f.name}"!`);
     } catch (err) {
@@ -81,7 +167,7 @@ export function DocumentViewerDialog({
       toast.success("Document analyzed!");
     } catch (e) {
       console.error(e);
-      toast.error("Summarization failed");
+      toast.error(aiErrorMessage(e, "Summarization failed"));
     } finally {
       setLoading(false);
     }
@@ -113,7 +199,7 @@ export function DocumentViewerDialog({
       }
     } catch (e) {
       console.error(e);
-      toast.error("Flashcard generation failed");
+      toast.error(aiErrorMessage(e, "Flashcard generation failed"));
     } finally {
       setLoading(false);
     }
@@ -144,7 +230,7 @@ export function DocumentViewerDialog({
       }
     } catch (e) {
       console.error(e);
-      toast.error("Quiz generation failed");
+      toast.error(aiErrorMessage(e, "Quiz generation failed"));
     } finally {
       setLoading(false);
     }
@@ -188,11 +274,11 @@ export function DocumentViewerDialog({
           {!file ? (
             <label className="flex flex-col items-center justify-center p-8 border-2 border-dashed rounded-2xl hover:border-primary cursor-pointer transition bg-card hover:bg-accent/40">
               <Upload className="h-8 w-8 text-muted-foreground mb-2" />
-              <span className="text-sm font-semibold">Choose PDF, PPT, TXT, or Document</span>
+              <span className="text-sm font-semibold">Choose PDF, PPTX, DOCX, or TXT</span>
               <span className="text-xs text-muted-foreground mt-1">Supports up to 25 MB</span>
               <input
                 type="file"
-                accept=".pdf,.txt,.md,.ppt,.pptx,.doc,.docx"
+                accept=".pdf,.txt,.md,.pptx,.docx"
                 onChange={handleFileChange}
                 className="hidden"
               />
@@ -212,7 +298,7 @@ export function DocumentViewerDialog({
                 Change File
                 <input
                   type="file"
-                  accept=".pdf,.txt,.md,.ppt,.pptx,.doc,.docx"
+                  accept=".pdf,.txt,.md,.pptx,.docx"
                   onChange={handleFileChange}
                   className="hidden"
                 />

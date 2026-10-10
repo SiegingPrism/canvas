@@ -7,20 +7,6 @@ export interface AIProviderConfig {
   modelName?: string;
 }
 
-function decodeKey(b64: string): string {
-  try {
-    if (typeof Buffer !== "undefined") return Buffer.from(b64, "base64").toString("utf-8");
-    if (typeof atob === "function") return atob(b64);
-  } catch {
-    /* ignore */
-  }
-  return "";
-}
-
-const DEFAULT_GEMINI_KEY = decodeKey(
-  "QVEuQWI4Uk42TFVfc05BNHNmcEg4d1pRRHZGcno2ZWlRak5xTm5YV01uTmExU3NlWjU0c3c="
-);
-
 /**
  * Creates an AI model instance based on available keys and provider configuration.
  * Supports Google Gemini directly, OpenAI, or custom OpenAI-compatible endpoints.
@@ -29,8 +15,7 @@ export function getAIModel(config: AIProviderConfig = {}) {
   const geminiKey =
     config.apiKey?.trim() ||
     process.env.GEMINI_API_KEY?.trim() ||
-    process.env.GOOGLE_GENERATIVE_AI_API_KEY?.trim() ||
-    DEFAULT_GEMINI_KEY;
+    process.env.GOOGLE_GENERATIVE_AI_API_KEY?.trim();
 
   const openAiKey = config.apiKey?.trim() || process.env.OPENAI_API_KEY?.trim();
 
@@ -45,15 +30,26 @@ export function getAIModel(config: AIProviderConfig = {}) {
       },
     });
     return {
-      model: provider(config.modelName || "gemini-3.8-flash"),
+      model: provider(config.modelName || "gemini-3.5-flash"),
       providerType: "gemini",
     };
   }
 
   if (providerType === "openai" && openAiKey) {
+    const isServerKey = !config.apiKey && Boolean(process.env.OPENAI_API_KEY);
+    const ALLOWED_OPENAI_BASES = ["https://api.openai.com/v1", "https://api.openai.com"];
+    let effectiveBaseURL = config.baseURL || "https://api.openai.com/v1";
+    if (isServerKey && config.baseURL) {
+      const normalized = config.baseURL.replace(/\/+$/, "");
+      if (!ALLOWED_OPENAI_BASES.includes(normalized)) {
+        console.warn(`Untrusted OpenAI baseURL rejected for server API key: ${config.baseURL}`);
+        effectiveBaseURL = "https://api.openai.com/v1";
+      }
+    }
+
     const provider = createOpenAICompatible({
       name: "openai",
-      baseURL: config.baseURL || "https://api.openai.com/v1",
+      baseURL: effectiveBaseURL,
       headers: {
         Authorization: `Bearer ${openAiKey}`,
       },

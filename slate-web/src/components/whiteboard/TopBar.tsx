@@ -42,11 +42,14 @@ import QRCode from "qrcode";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { syncBoardToSupabase } from "@/lib/supabase/dbService";
+import { useAuth } from "@/lib/supabase/authStore";
+import { AuthDialog } from "@/components/auth/AuthDialog";
 import { AISettingsDialog } from "@/components/ai/AISettingsDialog";
 import { DocumentViewerDialog } from "@/components/document/DocumentViewerDialog";
 import { MathFormulaDialog } from "./MathFormulaDialog";
 import { FeatureTourDialog } from "./FeatureTourDialog";
-import { AIEngine } from "@/lib/ai/aiEngine";
+import { AIEngine, aiErrorMessage } from "@/lib/ai/aiEngine";
+import { extractBoardSearchStrings } from "@/lib/ai/localRAG";
 import type { MindMapNodeObject } from "@/lib/whiteboard/types";
 
 import { TEMPLATES } from "@/lib/whiteboard/templates";
@@ -94,6 +97,8 @@ export function TopBar({
   } = useWhiteboard();
 
   const fileRef = useRef<HTMLInputElement>(null);
+  const { user } = useAuth();
+  const [authOpen, setAuthOpen] = useState(false);
   const [qrOpen, setQrOpen] = useState(false);
   const [qrData, setQrData] = useState<string>("");
   const [qrUrl, setQrUrl] = useState<string>("");
@@ -122,12 +127,21 @@ export function TopBar({
     setExplainDialogOpen(true);
     setExplainLoading(true);
     setExplainData(null);
+
+    const activePage = pages.find((p) => p.id === activePageId) || pages[0];
+    const pageStrings = extractBoardSearchStrings({ pages: activePage ? [activePage] : pages });
+    const boardContext = [
+      boardTitle ? `Board Title: "${boardTitle}"` : "",
+      pageStrings.length > 0 ? `Text & Formulas on Board: ${pageStrings.slice(0, 15).join("; ")}` : "",
+    ].filter(Boolean).join("\n");
+
     try {
-      const res = await AIEngine.explainBoard(img, boardTitle);
+      const res = await AIEngine.explainBoard(img, boardContext);
       setExplainData(res);
     } catch (e) {
       console.error(e);
-      toast.error("Board explanation failed");
+      setExplainDialogOpen(false);
+      toast.error(aiErrorMessage(e, "Board explanation failed"));
     } finally {
       setExplainLoading(false);
     }
@@ -162,7 +176,7 @@ export function TopBar({
       toast.success("AI Mind-Map generated and placed on canvas!");
     } catch (e) {
       console.error(e);
-      toast.error("Mind map generation failed");
+      toast.error(aiErrorMessage(e, "Mind map generation failed"));
     }
   }
 
@@ -222,7 +236,7 @@ export function TopBar({
       const activeMeta = activeBoardId ? boards[activeBoardId] : null;
       if (activeMeta) {
         toast.loading("Syncing board to cloud for sharing...", { id: "share-qr" });
-        await syncBoardToSupabase(activeMeta, pages);
+        await syncBoardToSupabase(activeMeta, pages, undefined, true);
         toast.success("Board synced to cloud!", { id: "share-qr" });
       }
 
@@ -441,7 +455,7 @@ export function TopBar({
 
       {/* Lecture Presentation Mode */}
       <button
-        className={cn(iconBtn, "text-indigo-500 hover:text-indigo-600 hover:bg-indigo-50 dark:hover:bg-indigo-950/30")}
+        className={cn(iconBtn, "hidden sm:grid text-indigo-500 hover:text-indigo-600 hover:bg-indigo-50 dark:hover:bg-indigo-950/30")}
         title="Start Lecture Presentation (Slides Mode)"
         onClick={() => window.dispatchEvent(new CustomEvent("slate:start-presentation"))}
       >
@@ -450,11 +464,20 @@ export function TopBar({
 
       {/* Radar Minimap */}
       <button
-        className={cn(iconBtn, "text-sky-500 hover:text-sky-600 hover:bg-sky-50 dark:hover:bg-sky-950/30")}
+        className={cn(iconBtn, "hidden sm:grid text-sky-500 hover:text-sky-600 hover:bg-sky-50 dark:hover:bg-sky-950/30")}
         title="Toggle Radar Minimap"
         onClick={() => window.dispatchEvent(new CustomEvent("slate:toggle-minimap"))}
       >
         <Compass className={iconSize} />
+      </button>
+
+      {/* Direct AI Assistant Button */}
+      <button
+        className={cn(iconBtn, "text-primary hover:bg-primary/10")}
+        title="AI Assistant & Copilot"
+        onClick={onOpenAI}
+      >
+        <Bot className={iconSize} />
       </button>
 
       {/* Burger Menu */}
@@ -544,7 +567,7 @@ export function TopBar({
             }}
           >
             <Settings className="h-3.5 w-3.5 text-muted-foreground" />
-            <span>AI & Offline Settings</span>
+            <span>AI Settings</span>
           </button>
 
           <div className="h-px w-full bg-border/60 my-1" />
@@ -634,13 +657,18 @@ export function TopBar({
             className="flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-xs font-medium hover:bg-accent text-foreground transition"
             onClick={async () => {
               setMenuOpen(false);
-              toast.info("Syncing whiteboard with Supabase cloud...");
+              if (!user) {
+                setAuthOpen(true);
+                toast.info("Sign in to sync your boards privately to the cloud.");
+                return;
+              }
+              toast.info("Syncing whiteboard with your private cloud account...");
               await syncWithCloud();
-              toast.success("Whiteboard synced with Supabase cloud");
+              toast.success("Whiteboard synced securely to your account");
             }}
           >
-            <Cloud className="h-3.5 w-3.5 text-blue-500" />
-            <span>Sync with Cloud</span>
+            <Cloud className={cn("h-3.5 w-3.5", user ? "text-emerald-500" : "text-blue-500")} />
+            <span>{user ? "Sync with Cloud" : "Sign In & Cloud Sync"}</span>
           </button>
         </PopoverContent>
       </Popover>
@@ -791,6 +819,9 @@ export function TopBar({
         open={tourOpen}
         onOpenChange={setTourOpen}
       />
+
+      {/* Account & Cloud Sync Dialog */}
+      <AuthDialog open={authOpen} onOpenChange={setAuthOpen} />
     </div>
   );
 }

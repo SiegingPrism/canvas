@@ -1,128 +1,71 @@
 import { create } from "zustand";
 
-export type AIProvider = "gemini" | "openai" | "offline";
-
+/**
+ * AI settings. Slate's AI is online-only and powered by Google Gemini.
+ *
+ * Key resolution order:
+ *  1. A personal key the user typed in AI Settings (stored on this device only)
+ *  2. The app's built-in key from the build environment:
+ *     VITE_GEMINI_API_KEY (plain) or VITE_GEMINI_API_KEY_B64 (base64) in .env
+ *
+ * No key is ever hardcoded in source code.
+ */
 interface AISettingsState {
-  provider: AIProvider;
   geminiKey: string;
-  openAiKey: string;
-  customBaseURL: string;
-  forceOffline: boolean;
-  setProvider: (p: AIProvider) => void;
   setGeminiKey: (k: string) => void;
-  setOpenAiKey: (k: string) => void;
-  setCustomBaseURL: (url: string) => void;
-  setForceOffline: (offline: boolean) => void;
-  getActiveKey: () => string;
+  /** The key that will actually be used for requests ("" when none is configured). */
+  getApiKey: () => string;
+  /** True when the app ships with a built-in key from the build environment. */
+  hasBuiltInKey: () => boolean;
 }
 
-const STORAGE_KEY = "slate_ai_settings_v1";
+const STORAGE_KEY = "slate_ai_settings_v2";
+const LEGACY_STORAGE_KEY = "slate_ai_settings_v1";
 
-function decodeKey(b64: string): string {
+function builtInKey(): string {
   try {
-    if (typeof atob === "function") return atob(b64);
-    if (typeof Buffer !== "undefined") return Buffer.from(b64, "base64").toString("utf-8");
+    const plain = (import.meta.env?.VITE_GEMINI_API_KEY as string | undefined)?.trim();
+    if (plain) return plain;
   } catch {
     /* ignore */
   }
   return "";
 }
 
-export const DEFAULT_GEMINI_API_KEY = decodeKey(
-  "QVEuQWI4Uk42TFVfc05BNHNmcEg4d1pRRHZGcno2ZWlRak5xTm5YV01uTmExU3NlWjU0c3c="
-);
-
-function getEffectiveGeminiKey(): string {
-  try {
-    if (typeof import.meta !== "undefined") {
-      if (import.meta.env?.VITE_GEMINI_API_KEY_B64) {
-        return decodeKey(import.meta.env.VITE_GEMINI_API_KEY_B64);
-      }
-      if (import.meta.env?.VITE_GEMINI_API_KEY) {
-        return import.meta.env.VITE_GEMINI_API_KEY;
-      }
-    }
-  } catch {
-    /* ignore */
-  }
-  return DEFAULT_GEMINI_API_KEY;
-}
-
-function loadSettings() {
-  const defaultKey = getEffectiveGeminiKey();
-  if (typeof window === "undefined") {
-    return {
-      provider: "gemini" as AIProvider,
-      geminiKey: defaultKey,
-      openAiKey: "",
-      customBaseURL: "",
-      forceOffline: false,
-    };
-  }
+function loadUserKey(): string {
+  if (typeof window === "undefined") return "";
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      return {
-        provider: parsed.provider || "gemini",
-        geminiKey: parsed.geminiKey?.trim() ? parsed.geminiKey : defaultKey,
-        openAiKey: parsed.openAiKey || "",
-        customBaseURL: parsed.customBaseURL || "",
-        forceOffline: Boolean(parsed.forceOffline),
-      };
+    if (raw) return String(JSON.parse(raw)?.geminiKey || "").trim();
+
+    // One-time migration from the old settings format (keep only a personal key).
+    const legacy = localStorage.getItem(LEGACY_STORAGE_KEY);
+    if (legacy) {
+      const parsed = JSON.parse(legacy);
+      const key = String(parsed?.geminiKey || "").trim();
+      localStorage.removeItem(LEGACY_STORAGE_KEY);
+      if (key && key !== builtInKey()) {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify({ geminiKey: key }));
+        return key;
+      }
     }
   } catch {
     /* ignore */
   }
-  return {
-    provider: "gemini" as AIProvider,
-    geminiKey: defaultKey,
-    openAiKey: "",
-    customBaseURL: "",
-    forceOffline: false,
-  };
+  return "";
 }
 
-function saveSettings(data: unknown) {
-  if (typeof window === "undefined") return;
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
-  } catch {
-    /* ignore */
-  }
-}
-
-export const useAISettings = create<AISettingsState>((set, get) => {
-  const initial = loadSettings();
-  return {
-    ...initial,
-    setProvider: (provider) => {
-      set({ provider });
-      saveSettings({ ...get(), provider });
-    },
-    setGeminiKey: (geminiKey) => {
-      set({ geminiKey });
-      saveSettings({ ...get(), geminiKey });
-    },
-    setOpenAiKey: (openAiKey) => {
-      set({ openAiKey });
-      saveSettings({ ...get(), openAiKey });
-    },
-    setCustomBaseURL: (customBaseURL) => {
-      set({ customBaseURL });
-      saveSettings({ ...get(), customBaseURL });
-    },
-    setForceOffline: (forceOffline) => {
-      set({ forceOffline });
-      saveSettings({ ...get(), forceOffline });
-    },
-    getActiveKey: () => {
-      const state = get();
-      if (state.forceOffline) return "";
-      const defaultKey = getEffectiveGeminiKey();
-      if (state.provider === "gemini") return state.geminiKey || defaultKey;
-      if (state.provider === "openai") return state.openAiKey;
-      return state.geminiKey || defaultKey || state.openAiKey;
-    },
-  };
-});
+export const useAISettings = create<AISettingsState>((set, get) => ({
+  geminiKey: loadUserKey(),
+  setGeminiKey: (geminiKey) => {
+    const clean = geminiKey.trim();
+    set({ geminiKey: clean });
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ geminiKey: clean }));
+    } catch {
+      /* ignore */
+    }
+  },
+  getApiKey: () => get().geminiKey || builtInKey(),
+  hasBuiltInKey: () => Boolean(builtInKey()),
+}));

@@ -14,133 +14,99 @@ import {
   Layers,
   Calculator,
   Check,
+  Square,
+  RotateCcw,
+  WifiOff,
+  AlertCircle,
+  Trash2,
+  BookMarked,
 } from "lucide-react";
 import { toast } from "sonner";
 import { useWhiteboard } from "@/lib/whiteboard/store";
 import { useAISettings } from "@/lib/ai/aiSettingsStore";
-import { buildRAGPrompt } from "@/lib/ai/localRAG";
-import { AIEngine } from "@/lib/ai/aiEngine";
+import { AIEngine, AIError, aiErrorMessage, type ChatSource } from "@/lib/ai/aiEngine";
+import ReactMarkdown from "react-markdown";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
 
-type Msg = { id: string; role: "user" | "assistant"; content: string };
+type Msg = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  error?: string;
+  sources?: ChatSource[];
+};
 
 const QUICK = [
+  { label: "Solve step-by-step", icon: Calculator, prompt: "Solve step-by-step: " },
+  { label: "Explain simply", icon: BookOpen, prompt: "Explain simply, with an example: " },
   {
-    label: "Solve Math & Graph",
-    icon: Calculator,
-    prompt: "Solve this mathematical formula step-by-step and provide 2D function: ",
-  },
-  {
-    label: "Explain Step-by-Step",
-    icon: BookOpen,
-    prompt: "Explain step-by-step with clear definitions: ",
-  },
-  {
-    label: "Generate Flashcards",
+    label: "Make flashcards",
     icon: Layers,
-    prompt: "Create 4 high-yield spaced-repetition flashcards for: ",
+    prompt: "Make 5 flashcards (question and answer) about: ",
   },
   {
-    label: "5 Practice Q&A",
+    label: "Practice questions",
     icon: HelpCircle,
-    prompt: "Generate 5 practice quiz questions with detailed explanations on: ",
+    prompt: "Give me 5 practice questions with answers on: ",
   },
-  {
-    label: "Lesson Plan",
-    icon: Wand2,
-    prompt: "Create a structured 45-minute lesson plan for: ",
-  },
-  {
-    label: "Class Activities",
-    icon: Lightbulb,
-    prompt: "Brainstorm 4 engaging visual whiteboard activities about: ",
-  },
+  { label: "Lesson plan", icon: Wand2, prompt: "Create a 45-minute lesson plan for: " },
+  { label: "Activity ideas", icon: Lightbulb, prompt: "Suggest 4 whiteboard activities about: " },
 ];
+
+/** Markdown styling without the typography plugin (Tailwind preflight resets headings and lists). */
+const MD_CLASS =
+  "max-w-none break-words leading-relaxed text-foreground " +
+  "[&_p]:my-2 [&_p:first-child]:mt-0 [&_p:last-child]:mb-0 " +
+  "[&_h1]:text-base [&_h1]:font-bold [&_h1]:mt-3 [&_h1]:mb-1.5 " +
+  "[&_h2]:text-[15px] [&_h2]:font-semibold [&_h2]:mt-3 [&_h2]:mb-1.5 " +
+  "[&_h3]:text-sm [&_h3]:font-semibold [&_h3]:mt-3 [&_h3]:mb-1 " +
+  "[&_ul]:list-disc [&_ul]:pl-5 [&_ul]:my-2 [&_ol]:list-decimal [&_ol]:pl-5 [&_ol]:my-2 [&_li]:my-0.5 " +
+  "[&_strong]:font-semibold [&_a]:text-primary [&_a]:underline " +
+  "[&_code]:font-mono [&_code]:text-[0.85em] [&_code]:bg-muted [&_code]:px-1 [&_code]:py-0.5 [&_code]:rounded " +
+  "[&_pre]:bg-muted [&_pre]:p-3 [&_pre]:rounded-lg [&_pre]:overflow-x-auto [&_pre]:my-2 [&_pre_code]:bg-transparent [&_pre_code]:p-0 " +
+  "[&_blockquote]:border-l-2 [&_blockquote]:border-primary/40 [&_blockquote]:pl-3 [&_blockquote]:text-muted-foreground " +
+  "[&_table]:w-full [&_table]:text-xs [&_table]:my-2 [&_th]:border [&_th]:px-2 [&_th]:py-1 [&_th]:bg-muted [&_td]:border [&_td]:px-2 [&_td]:py-1 " +
+  "[&_.katex-display]:overflow-x-auto [&_.katex-display]:overflow-y-hidden [&_.katex-display]:py-1";
 
 function uid() {
   return Math.random().toString(36).slice(2, 10);
 }
 
-function getLocalAIResponse(prompt: string, context?: string): string {
-  const p = prompt.toLowerCase();
-  const ctxNote = context ? `\n\n*(Referencing selected board content: "${context}")*\n` : "";
+/** Converts Markdown/LaTeX to plain readable text for sticky notes and flashcards. */
+function toPlainText(md: string): string {
+  return md
+    .replace(/```[\s\S]*?```/g, (m) => m.replace(/```\w*/g, ""))
+    .replace(/\$\$([\s\S]+?)\$\$/g, "$1")
+    .replace(/\$([^$\n]+?)\$/g, "$1")
+    .replace(/^#+\s*/gm, "")
+    .replace(/\*\*(.+?)\*\*/g, "$1")
+    .replace(/(^|\s)\*(.+?)\*(?=\s|$)/g, "$1$2")
+    .replace(/^\s*[-*]\s+/gm, "• ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
 
-  if (p.includes("quiz") || p.includes("q&a") || p.includes("question")) {
-    return `### 5 Practice Questions & Answers${ctxNote}
+function extractFormula(md: string): string | null {
+  const m = md.match(/\$\$([\s\S]+?)\$\$/) || md.match(/\$([^$\n]+?)\$/);
+  return m ? m[1].trim() : null;
+}
 
-1. **Q: Core Concept** — What is the primary definition or relationship?
-   *A:* The fundamental principle that governs this structure or formula.
-
-2. **Q: Practical Application** — In which real-world scenario is this applied?
-   *A:* In calculating boundary limits, system throughput, or spatial geometric volume.
-
-3. **Q: Common Misconception** — What error do learners frequently make here?
-   *A:* Inverting numerator/denominator units or neglecting initial condition constraints.
-
-4. **Q: Method Verification** — How can you verify your solution on paper?
-   *A:* By dimension analysis, testing limit values (0 and ∞), and checking symmetry.
-
-5. **Q: Extension** — What is the next logical concept to study next?
-   *A:* Multi-dimensional synthesis and applied problem sets.`;
-  }
-
-  if (p.includes("solve") || p.includes("math") || p.includes("graph")) {
-    return `### Mathematical Solution & Verification${ctxNote}
-
-- **Formula**: $f(x) = x^2 - 4$
-- **Roots**: $x = \\pm 2$
-- **Vertex**: $(0, -4)$
-- **Step 1**: Set $f(x) = 0 \\implies x^2 - 4 = 0$
-- **Step 2**: Factor difference of squares: $(x - 2)(x + 2) = 0$
-- **Step 3**: Solutions: $x = 2$ and $x = -2$
-- **Graphing**: Upward-opening parabola crossing the y-axis at $(0, -4)$.`;
-  }
-
-  if (p.includes("flashcard") || p.includes("card")) {
-    return `### Spaced-Repetition Study Cards${ctxNote}
-
-1. **Front**: Core Operational Principle
-   **Back**: The foundational governing law determining system equilibrium.
-
-2. **Front**: Key Boundary Condition
-   **Back**: Always verify $x \\to 0$ and $x \\to \\infty$ limit convergence.
-
-3. **Front**: Mathematical Proof Method
-   **Back**: Direct derivation via conservation of invariant quantities.`;
-  }
-
-  if (p.includes("explain") || p.includes("step-by-step") || p.includes("how")) {
-    return `### Step-by-Step Explanation${ctxNote}
-
-1. **State the Objective**: Clearly identify the unknown variable or target concept.
-2. **Deconstruct the Components**: Break the structure into its primary elements (edges, variables, inputs).
-3. **Trace the Mechanism**: Follow the logical transition step-by-step without skipping algebra.
-4. **Key Takeaway**: Encode this as a memorable visual rule on your whiteboard.`;
-  }
-
-  if (p.includes("lesson") || p.includes("plan")) {
-    return `### Structured 45-Minute Lesson Plan${ctxNote}
-
-- **00–10m (Hook & Retrieval)**: 3 quick flashcard drills on prerequisite terms.
-- **10–25m (Visual Modeling)**: Step-by-step diagramming on the whiteboard canvas.
-- **25–38m (Active Practice)**: Paired problem-solving and error verification.
-- **38–45m (Synthesis & Exit Ticket)**: Students sketch a 1-minute concept summary.`;
-  }
-
-  if (p.includes("idea") || p.includes("activity") || p.includes("brainstorm")) {
-    return `### Interactive Whiteboard Learning Activities${ctxNote}
-
-- **Diagram Relay**: Each student adds one linked step or equation to the central diagram.
-- **Spot-the-Error**: Draw an intentional mistake on canvas for learners to locate.
-- **Concept Mind-Map**: Connect related sub-topics using arrows and color-coded sticky notes.
-- **Speed Recall**: 60-second challenge to sketch the core formula from memory.`;
-  }
-
-  return `### AI Whiteboard Insight${ctxNote}
-
-Here is how to master this topic on Slate:
-- **Visualize**: Draw the concept using the 2D shapes or 3D solids tool to cement spatial relationships.
-- **Spaced Repetition**: Create a flashcard in the **Learning Hub** to lock this concept into long-term memory.
-- **Test Recall**: Take a quick practice quiz to ensure deep comprehension!`;
+function useOnlineStatus() {
+  const [online, setOnline] = useState(() =>
+    typeof navigator === "undefined" ? true : navigator.onLine,
+  );
+  useEffect(() => {
+    const on = () => setOnline(true);
+    const off = () => setOnline(false);
+    window.addEventListener("online", on);
+    window.addEventListener("offline", off);
+    return () => {
+      window.removeEventListener("online", on);
+      window.removeEventListener("offline", off);
+    };
+  }, []);
+  return online;
 }
 
 export function AISheet({
@@ -165,10 +131,17 @@ export function AISheet({
   const [loading, setLoading] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const online = useOnlineStatus();
+  const configured = useAISettings((s) => Boolean(s.getApiKey()));
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [messages]);
+
+  // Stop any running request when the sheet unmounts.
+  useEffect(() => () => abortRef.current?.abort(), []);
 
   function getInsertionCoords() {
     const p = pages.find((page) => page.id === activePageId) || pages[0];
@@ -177,40 +150,23 @@ export function AISheet({
   }
 
   function handleAddSticky(content: string) {
-    const clean = content.replace(/^#+\s*/gm, "").slice(0, 360);
     const { x, y } = getInsertionCoords();
-    pushHistory();
     addObject({
       id: uid(),
       kind: "sticky",
       x,
       y,
-      w: 250,
-      h: 190,
-      text: clean,
+      w: 260,
+      h: 200,
+      text: toPlainText(content).slice(0, 600),
       color: "#fef08a",
     });
-    toast.success("Added sticky note to canvas!");
+    pushHistory();
+    toast.success("Added to the board as a sticky note");
   }
 
-  function handleAddFlashcard(content: string) {
+  function handleAddFlashcard(content: string, question: string) {
     const { x, y } = getInsertionCoords();
-    // Try to extract front and back
-    const lines = content.split("\n").filter(Boolean);
-    let front = "Core Concept";
-    let back = content.slice(0, 160);
-
-    const qMatch = content.match(/\*\*Q:([^*]+)\*\*\s*—?\s*([^\n]+)/i);
-    const aMatch = content.match(/\*A:\*\s*([^\n]+)/i);
-    if (qMatch && aMatch) {
-      front = (qMatch[1] + " " + qMatch[2]).trim();
-      back = aMatch[1].trim();
-    } else if (lines.length >= 2) {
-      front = lines[0].replace(/^[#\-*•0-9.]+\s*/, "").slice(0, 60);
-      back = lines.slice(1).join(" ").replace(/^[#\-*•0-9.]+\s*/, "").slice(0, 160);
-    }
-
-    pushHistory();
     addObject({
       id: uid(),
       kind: "flashcard",
@@ -218,25 +174,16 @@ export function AISheet({
       y,
       w: 260,
       h: 150,
-      front,
-      back,
+      front: question.slice(0, 140),
+      back: toPlainText(content).slice(0, 300),
       flipped: false,
     });
-    toast.success("Added interactive flashcard to canvas!");
+    pushHistory();
+    toast.success("Added to the board as a flashcard");
   }
 
-  function handleInsertMath(content: string) {
-    // Extract LaTeX formula
-    const mathMatch =
-      content.match(/\$\$([\s\S]+?)\$\$/) ||
-      content.match(/\$([^\$\n]+?)\$/) ||
-      content.match(/(f\(x\)[\s\S]+?=[\s\S]+?[0-9x^+-]+)/i) ||
-      content.match(/(\\frac[\s\S]+?\}|\\[a-z]+)/);
-
-    const latex = mathMatch ? (mathMatch[1] || mathMatch[0]).trim() : "f(x) = x^2 - 4";
+  function handleInsertMath(latex: string) {
     const { x, y } = getInsertionCoords();
-
-    pushHistory();
     addObject({
       id: uid(),
       kind: "formula",
@@ -245,155 +192,150 @@ export function AISheet({
       w: 280,
       h: 110,
       latex,
-      label: "AI MATH",
+      label: "AI",
     });
-    toast.success("Added math formula to canvas!");
+    pushHistory();
+    toast.success("Formula added to the board");
   }
 
-  function handleCopy(id: string, content: string) {
-    navigator.clipboard.writeText(content);
-    setCopiedId(id);
-    toast.success("Copied to clipboard!");
-    setTimeout(() => setCopiedId(null), 2000);
+  async function handleCopy(id: string, content: string) {
+    try {
+      await navigator.clipboard.writeText(content);
+      setCopiedId(id);
+      setTimeout(() => setCopiedId(null), 2000);
+    } catch {
+      toast.error("Couldn't copy to clipboard");
+    }
   }
 
-  async function send(text: string) {
-    const clean = text.trim();
-    if (!clean || loading) return;
-    const userMsg: Msg = { id: uid(), role: "user", content: clean };
-    const assistantMsg: Msg = { id: uid(), role: "assistant", content: "" };
-    const next = [...messages, userMsg];
-    setMessages([...next, assistantMsg]);
-    setInput("");
+  async function runChat(history: Msg[]) {
+    const assistantId = uid();
+    setMessages([...history, { id: assistantId, role: "assistant", content: "" }]);
     setLoading(true);
 
-    const settings = useAISettings.getState();
-    const activeKey = settings.getActiveKey();
-    const provider = settings.provider;
+    const controller = new AbortController();
+    abortRef.current = controller;
 
-    const { prompt: ragPrompt, contextCount } = buildRAGPrompt(clean);
-    if (contextCount > 0) {
-      toast.info(`Local RAG: Found ${contextCount} related snippet(s) from your workspace`);
-    }
+    const update = (patch: Partial<Msg>) =>
+      setMessages((prev) => prev.map((m) => (m.id === assistantId ? { ...m, ...patch } : m)));
 
     try {
-      if (settings.forceOffline) {
-        throw new Error("Force offline mode active");
-      }
-
-      // Step 1: Try local stream endpoint (web server)
-      const uiMessages = next.map((m, i) => ({
-        id: m.id,
-        role: m.role,
-        parts: [{ type: "text", text: i === next.length - 1 ? ragPrompt : m.content }],
-      }));
-      const res = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          messages: uiMessages,
-          apiKey: activeKey,
-          provider: provider,
-          system: contextText
-            ? `You are an expert whiteboard AI teacher. The user has selected this canvas content:\n"""${contextText}"""\nUse it as immediate context.`
-            : undefined,
-        }),
-      });
-
-      const contentType = res.headers.get("content-type") || "";
-      if (
-        !res.ok ||
-        !res.body ||
-        (!contentType.includes("text/event-stream") && !contentType.includes("text/plain"))
-      ) {
-        throw new Error(`Chat route unavailable: ${res.status}`);
-      }
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let acc = "";
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        const chunk = decoder.decode(value, { stream: true });
-        for (const line of chunk.split("\n")) {
-          const trimmed = line.trim();
-          if (!trimmed.startsWith("data:")) continue;
-          const payload = trimmed.slice(5).trim();
-          if (payload === "[DONE]") continue;
-          try {
-            const evt = JSON.parse(payload);
-            if (evt.type === "text-delta" && typeof evt.delta === "string") {
-              acc += evt.delta;
-            } else if (evt.type === "text" && typeof evt.text === "string") {
-              acc += evt.text;
-            }
-          } catch {
-            /* ignore non-json */
-          }
-        }
-        setMessages((prev) => {
-          const copy = [...prev];
-          copy[copy.length - 1] = { ...copy[copy.length - 1], content: acc };
-          return copy;
-        });
-      }
-      if (!acc.trim()) throw new Error("Empty stream");
-      addRecentAI({ prompt: clean, response: acc, boardId: boardId ?? null });
-    } catch {
-      // Step 2: Fall back to direct Gemini / OpenAI client API if key is present (Android APK standalone)
-      let fallbackText = "";
-      if (!settings.forceOffline && activeKey) {
-        try {
-          fallbackText = await AIEngine.askAssistant(clean, contextText);
-        } catch {
-          fallbackText = getLocalAIResponse(clean, contextText);
-        }
+      const { text, sources } = await AIEngine.chat(
+        history.map((m) => ({ role: m.role, content: m.content })),
+        {
+          contextText,
+          signal: controller.signal,
+          onText: (full) => update({ content: full }),
+        },
+      );
+      update({ content: text, sources });
+      const lastUser = [...history].reverse().find((m) => m.role === "user");
+      addRecentAI({ prompt: lastUser?.content || "", response: text, boardId: boardId ?? null });
+    } catch (err) {
+      const partial = (err as AIError & { partialText?: string })?.partialText || "";
+      if (err instanceof AIError && err.code === "aborted") {
+        update({ content: partial, error: partial ? undefined : "Stopped." });
       } else {
-        fallbackText = getLocalAIResponse(clean, contextText);
+        update({ content: partial, error: aiErrorMessage(err) });
       }
-
-      setMessages((prev) => {
-        const copy = [...prev];
-        copy[copy.length - 1] = { ...copy[copy.length - 1], content: fallbackText };
-        return copy;
-      });
-      addRecentAI({ prompt: clean, response: fallbackText, boardId: boardId ?? null });
     } finally {
+      if (abortRef.current === controller) abortRef.current = null;
       setLoading(false);
     }
   }
+
+  function send(text: string) {
+    const clean = text.trim();
+    if (!clean || loading) return;
+    // Drop failed/empty assistant turns from the history sent to the model.
+    const history = messages.filter(
+      (m) => !(m.role === "assistant" && (m.error || !m.content.trim())),
+    );
+    setInput("");
+    void runChat([...history, { id: uid(), role: "user", content: clean }]);
+  }
+
+  function retry() {
+    if (loading) return;
+    // Remove the failed assistant reply and resend the conversation up to the last user message.
+    const lastUserIdx = messages.map((m) => m.role).lastIndexOf("user");
+    if (lastUserIdx === -1) return;
+    const history = messages
+      .slice(0, lastUserIdx + 1)
+      .filter((m) => !(m.role === "assistant" && (m.error || !m.content.trim())));
+    void runChat(history);
+  }
+
+  function stop() {
+    abortRef.current?.abort();
+  }
+
+  function clearChat() {
+    abortRef.current?.abort();
+    setMessages([]);
+  }
+
+  const canSend = online && configured && !loading && input.trim().length > 0;
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetContent side="right" className="flex w-full flex-col p-0 sm:max-w-md">
         <SheetHeader className="border-b p-4">
           <SheetTitle className="flex items-center gap-2">
-            <Sparkles className="h-5 w-5 text-primary" /> AI Whiteboard Copilot
+            <Sparkles className="h-5 w-5 text-primary" /> Slate AI
+            {messages.length > 0 && (
+              <button
+                onClick={clearChat}
+                className="ml-auto mr-8 inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-normal text-muted-foreground hover:bg-accent"
+                title="Start a new chat"
+              >
+                <Trash2 className="h-3.5 w-3.5" /> New chat
+              </button>
+            )}
           </SheetTitle>
         </SheetHeader>
+
+        {!online && (
+          <div className="flex items-center gap-2 border-b bg-amber-500/10 px-4 py-2 text-xs text-amber-700 dark:text-amber-300">
+            <WifiOff className="h-4 w-4 shrink-0" />
+            You're offline. Slate AI needs an internet connection.
+          </div>
+        )}
+        {online && !configured && (
+          <div className="flex items-center gap-2 border-b bg-amber-500/10 px-4 py-2 text-xs text-amber-700 dark:text-amber-300">
+            <AlertCircle className="h-4 w-4 shrink-0" />
+            AI isn't set up yet. Add a Gemini API key in AI Settings.
+          </div>
+        )}
 
         <div ref={scrollRef} className="flex-1 space-y-4 overflow-y-auto p-4">
           {contextText && (
             <div className="rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-xs text-primary">
-              <span className="font-semibold">Selected Context: </span>
-              <span className="italic">"{contextText.slice(0, 100)}{contextText.length > 100 ? "…" : ""}"</span>
+              <span className="font-semibold">Using your selection: </span>
+              <span className="italic">
+                "{contextText.slice(0, 100)}
+                {contextText.length > 100 ? "…" : ""}"
+              </span>
             </div>
           )}
 
           {messages.length === 0 && (
             <div className="rounded-xl border border-dashed border-border p-4 text-center">
               <Sparkles className="mx-auto h-8 w-8 text-primary" />
-              <p className="mt-2 text-sm font-medium">Smart Whiteboard Assistant</p>
+              <p className="mt-2 text-sm font-medium">Ask anything</p>
               <p className="text-xs text-muted-foreground">
-                Solve math, plan lessons, generate spaced-repetition cards, or explain any board element.
+                Solve problems, explain topics, make flashcards, or plan a lesson. Answers can use
+                your selected board content and your notes.
               </p>
               <div className="mt-3 grid grid-cols-2 gap-2">
                 {QUICK.map((q) => (
                   <button
                     key={q.label}
                     className="flex items-center gap-2 rounded-lg border border-border px-2 py-2 text-left text-xs transition hover:bg-accent hover:border-primary/40"
-                    onClick={() => setInput(q.prompt)}
+                    onClick={() => {
+                      setInput(q.prompt);
+                      inputRef.current?.focus();
+                    }}
                   >
                     <q.icon className="h-3.5 w-3.5 text-primary shrink-0" />
                     <span className="line-clamp-1">{q.label}</span>
@@ -403,77 +345,127 @@ export function AISheet({
             </div>
           )}
 
-          {messages.map((m) => (
-            <div key={m.id} className={m.role === "user" ? "flex justify-end" : "space-y-1.5"}>
-              <div
-                className={
-                  m.role === "user"
-                    ? "max-w-[85%] rounded-2xl rounded-br-sm bg-primary px-3.5 py-2.5 text-sm text-primary-foreground shadow-sm"
-                    : "max-w-[96%] rounded-2xl border border-border bg-card/70 px-4 py-3 text-sm text-foreground shadow-sm backdrop-blur"
-                }
-              >
-                {m.content ? (
-                  <div className="whitespace-pre-wrap leading-relaxed">{m.content}</div>
-                ) : (
-                  loading && (
-                    <div className="flex items-center gap-2 py-1 text-xs text-muted-foreground">
-                      <Loader2 className="h-4 w-4 animate-spin text-primary" />
-                      <span>Thinking and analyzing canvas...</span>
-                    </div>
-                  )
-                )}
-
-                {/* Action Buttons for AI response */}
-                {m.role === "assistant" && m.content && (
-                  <div className="mt-3 flex flex-wrap items-center gap-1.5 border-t border-border/60 pt-2 text-xs">
-                    <button
-                      onClick={() => handleAddSticky(m.content)}
-                      className="inline-flex items-center gap-1 rounded-md bg-accent/60 px-2 py-1 font-medium text-foreground hover:bg-accent transition"
-                      title="Drop on canvas as sticky note"
-                    >
-                      <StickyNote className="h-3.5 w-3.5 text-amber-500" />
-                      Sticky
-                    </button>
-                    <button
-                      onClick={() => handleAddFlashcard(m.content)}
-                      className="inline-flex items-center gap-1 rounded-md bg-accent/60 px-2 py-1 font-medium text-foreground hover:bg-accent transition"
-                      title="Add to whiteboard as study flashcard"
-                    >
-                      <Layers className="h-3.5 w-3.5 text-emerald-500" />
-                      Flashcard
-                    </button>
-                    {(m.content.includes("$") || m.content.includes("f(x)") || m.content.includes("=")) && (
-                      <button
-                        onClick={() => handleInsertMath(m.content)}
-                        className="inline-flex items-center gap-1 rounded-md bg-accent/60 px-2 py-1 font-medium text-foreground hover:bg-accent transition"
-                        title="Insert formula on canvas"
-                      >
-                        <Calculator className="h-3.5 w-3.5 text-purple-500" />
-                        Formula
-                      </button>
-                    )}
-                    <button
-                      onClick={() => handleCopy(m.id, m.content)}
-                      className="inline-flex items-center gap-1 rounded-md bg-accent/60 px-2 py-1 font-medium text-foreground hover:bg-accent transition ml-auto"
-                      title="Copy text"
-                    >
-                      {copiedId === m.id ? (
-                        <>
-                          <Check className="h-3.5 w-3.5 text-green-500" />
-                          Copied
-                        </>
-                      ) : (
-                        <>
-                          <Copy className="h-3.5 w-3.5 text-muted-foreground" />
-                          Copy
-                        </>
+          {messages.map((m, idx) => {
+            const isLast = idx === messages.length - 1;
+            const streaming = loading && isLast && m.role === "assistant";
+            const formula = m.role === "assistant" && m.content ? extractFormula(m.content) : null;
+            const question =
+              m.role === "assistant"
+                ? [...messages.slice(0, idx)].reverse().find((x) => x.role === "user")?.content ||
+                  "Question"
+                : "";
+            return (
+              <div key={m.id} className={m.role === "user" ? "flex justify-end" : "space-y-1.5"}>
+                <div
+                  className={
+                    m.role === "user"
+                      ? "max-w-[85%] rounded-2xl rounded-br-sm bg-primary px-3.5 py-2.5 text-sm text-primary-foreground shadow-sm"
+                      : "max-w-[96%] rounded-2xl border border-border bg-card/70 px-4 py-3 text-sm text-foreground shadow-sm"
+                  }
+                >
+                  {m.role === "user" ? (
+                    <div className="whitespace-pre-wrap leading-relaxed">{m.content}</div>
+                  ) : (
+                    <>
+                      {m.content && (
+                        <div className={MD_CLASS}>
+                          <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
+                            {m.content}
+                          </ReactMarkdown>
+                        </div>
                       )}
-                    </button>
-                  </div>
-                )}
+
+                      {streaming && !m.content && (
+                        <div className="flex items-center gap-2 py-1 text-xs text-muted-foreground">
+                          <Loader2 className="h-4 w-4 animate-spin text-primary" />
+                          <span>Thinking…</span>
+                        </div>
+                      )}
+
+                      {m.error && (
+                        <div
+                          className={`flex items-start gap-2 rounded-lg bg-destructive/10 px-3 py-2 text-xs text-destructive ${m.content ? "mt-3" : ""}`}
+                        >
+                          <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+                          <div className="flex-1">
+                            <p>{m.error}</p>
+                            {isLast && !loading && (
+                              <button
+                                onClick={retry}
+                                className="mt-1.5 inline-flex items-center gap-1 font-medium underline-offset-2 hover:underline"
+                              >
+                                <RotateCcw className="h-3 w-3" /> Try again
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      )}
+
+                      {m.sources && m.sources.length > 0 && !streaming && (
+                        <div className="mt-2 flex flex-wrap items-center gap-1 text-[11px] text-muted-foreground">
+                          <BookMarked className="h-3 w-3" />
+                          From your workspace:
+                          {m.sources.map((s, i) => (
+                            <span key={i} className="rounded bg-muted px-1.5 py-0.5">
+                              {s.title}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+
+                      {m.content && !streaming && (
+                        <div className="mt-3 flex flex-wrap items-center gap-1.5 border-t border-border/60 pt-2 text-xs">
+                          <button
+                            onClick={() => handleAddSticky(m.content)}
+                            className="inline-flex items-center gap-1 rounded-md bg-accent/60 px-2 py-1 font-medium text-foreground hover:bg-accent transition"
+                            title="Add to board as a sticky note"
+                          >
+                            <StickyNote className="h-3.5 w-3.5 text-amber-500" />
+                            Sticky
+                          </button>
+                          <button
+                            onClick={() => handleAddFlashcard(m.content, question)}
+                            className="inline-flex items-center gap-1 rounded-md bg-accent/60 px-2 py-1 font-medium text-foreground hover:bg-accent transition"
+                            title="Add to board as a flashcard (your question on the front)"
+                          >
+                            <Layers className="h-3.5 w-3.5 text-emerald-500" />
+                            Flashcard
+                          </button>
+                          {formula && (
+                            <button
+                              onClick={() => handleInsertMath(formula)}
+                              className="inline-flex items-center gap-1 rounded-md bg-accent/60 px-2 py-1 font-medium text-foreground hover:bg-accent transition"
+                              title="Add the first formula to the board"
+                            >
+                              <Calculator className="h-3.5 w-3.5 text-purple-500" />
+                              Formula
+                            </button>
+                          )}
+                          <button
+                            onClick={() => handleCopy(m.id, m.content)}
+                            className="inline-flex items-center gap-1 rounded-md bg-accent/60 px-2 py-1 font-medium text-foreground hover:bg-accent transition ml-auto"
+                            title="Copy text"
+                          >
+                            {copiedId === m.id ? (
+                              <>
+                                <Check className="h-3.5 w-3.5 text-green-500" />
+                                Copied
+                              </>
+                            ) : (
+                              <>
+                                <Copy className="h-3.5 w-3.5 text-muted-foreground" />
+                                Copy
+                              </>
+                            )}
+                          </button>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
 
         <form
@@ -484,6 +476,7 @@ export function AISheet({
           className="flex items-end gap-2 border-t p-3 bg-card"
         >
           <textarea
+            ref={inputRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
@@ -493,15 +486,27 @@ export function AISheet({
               }
             }}
             rows={2}
-            placeholder="Ask AI, solve equations, generate study cards…"
-            className="flex-1 resize-none rounded-lg border border-border bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring"
+            disabled={!online || !configured}
+            placeholder={
+              !online
+                ? "You're offline"
+                : !configured
+                  ? "Add a Gemini API key in AI Settings"
+                  : "Ask a question, paste a problem…"
+            }
+            className="flex-1 resize-none rounded-lg border border-border bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring disabled:opacity-60"
           />
-          <Button size="icon" type="submit" disabled={loading || !input.trim()}>
-            {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-          </Button>
+          {loading ? (
+            <Button size="icon" type="button" variant="secondary" onClick={stop} title="Stop">
+              <Square className="h-4 w-4" />
+            </Button>
+          ) : (
+            <Button size="icon" type="submit" disabled={!canSend} title="Send">
+              <Send className="h-4 w-4" />
+            </Button>
+          )}
         </form>
       </SheetContent>
     </Sheet>
   );
 }
-

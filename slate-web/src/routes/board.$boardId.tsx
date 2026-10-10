@@ -49,54 +49,101 @@ function BoardPage() {
   const { selectedId, pages, activePageId, activeBoardId, boards, boardData, openBoard, hydrated } =
     useWhiteboard();
 
+  const [loadTimedOut, setLoadTimedOut] = useState(false);
+
+  // Watchdog timer: If loading takes longer than 3.5s, offer manual recovery
   useEffect(() => {
-    if (!hydrated) return;
+    const timer = setTimeout(() => {
+      setLoadTimedOut(true);
+    }, 3500);
+    return () => clearTimeout(timer);
+  }, [boardId]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    // If board is already loaded and active, ensure it has pages
+    if (activeBoardId === boardId && (!pages || pages.length === 0)) {
+      openBoard(boardId);
+      return;
+    }
+
+    if (!hydrated) {
+      // Force open if hydration takes over 1.5s
+      const fallbackHydration = setTimeout(() => {
+        if (!cancelled && !boardData[boardId]) {
+          openBoard(boardId);
+        }
+      }, 1500);
+      return () => {
+        cancelled = true;
+        clearTimeout(fallbackHydration);
+      };
+    }
+
     if (!boardData[boardId]) {
       if (boards[boardId]) {
         openBoard(boardId);
         return;
       }
-      fetchBoardById(boardId).then((cb) => {
-        if (cb) {
-          const pages = Array.isArray(cb.pages) && cb.pages.length
-            ? cb.pages
-            : [{ id: Math.random().toString(36).slice(2, 10), objects: [], background: (cb.background as any) || "white" }];
-          const meta = {
-            id: cb.id,
-            title: cb.title || "Untitled board",
-            tags: [],
-            folderId: cb.folder_id || null,
-            favorite: Boolean(cb.is_starred),
-            archived: false,
-            createdAt: cb.created_at ? new Date(cb.created_at).getTime() : Date.now(),
-            updatedAt: cb.updated_at ? new Date(cb.updated_at).getTime() : Date.now(),
-          };
-          useWhiteboard.setState((prev) => ({
-            ...prev,
-            boards: { ...prev.boards, [cb.id]: meta },
-            boardOrder: prev.boardOrder.includes(cb.id) ? prev.boardOrder : [cb.id, ...prev.boardOrder],
-            boardData: { ...prev.boardData, [cb.id]: { pages, activePageId: pages[0].id } },
-            activeBoardId: cb.id,
-            pages,
-            activePageId: pages[0].id,
-          }));
-        } else {
-          if (boards[boardId]) {
-            openBoard(boardId);
+
+      // Fetch from cloud with a strict 2.5s timeout & catch to prevent hanging
+      const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), 2500));
+      Promise.race([fetchBoardById(boardId), timeoutPromise])
+        .then((cb) => {
+          if (cancelled) return;
+          if (cb) {
+            const pages = Array.isArray(cb.pages) && cb.pages.length
+              ? cb.pages
+              : [{ id: Math.random().toString(36).slice(2, 10), objects: [], background: (cb.background as any) || "white" }];
+            const meta = {
+              id: cb.id,
+              title: cb.title || "Untitled board",
+              tags: [],
+              folderId: cb.folder_id || null,
+              favorite: Boolean(cb.is_starred),
+              archived: false,
+              createdAt: cb.created_at ? new Date(cb.created_at).getTime() : Date.now(),
+              updatedAt: cb.updated_at ? new Date(cb.updated_at).getTime() : Date.now(),
+            };
+            useWhiteboard.setState((prev) => ({
+              ...prev,
+              boards: { ...prev.boards, [cb.id]: meta },
+              boardOrder: prev.boardOrder.includes(cb.id) ? prev.boardOrder : [cb.id, ...prev.boardOrder],
+              boardData: { ...prev.boardData, [cb.id]: { pages, activePageId: pages[0].id } },
+              activeBoardId: cb.id,
+              pages,
+              activePageId: pages[0].id,
+            }));
           } else {
-            navigate({ to: "/", replace: true });
+            // Not found in cloud or timed out — open local board or create fallback
+            openBoard(boardId);
           }
-        }
-      });
-      return;
+        })
+        .catch(() => {
+          if (!cancelled) {
+            openBoard(boardId);
+          }
+        });
+      return () => {
+        cancelled = true;
+      };
     }
-    if (activeBoardId !== boardId) openBoard(boardId);
-  }, [boardId, boardData, boards, activeBoardId, openBoard, navigate, hydrated]);
+
+    if (activeBoardId !== boardId) {
+      openBoard(boardId);
+    }
+  }, [boardId, boardData, boards, activeBoardId, openBoard, navigate, hydrated, pages]);
 
   useEffect(() => {
     const handleOpenWidgets = () => setWidgetsOpen(true);
+    const handleOpenAI = () => setAIOpen(true);
     window.addEventListener("slate:open-widgets", handleOpenWidgets);
-    return () => window.removeEventListener("slate:open-widgets", handleOpenWidgets);
+    window.addEventListener("slate:open-ai", handleOpenAI);
+    return () => {
+      window.removeEventListener("slate:open-widgets", handleOpenWidgets);
+      window.removeEventListener("slate:open-ai", handleOpenAI);
+    };
   }, []);
 
   const board = boards[boardId];
@@ -108,8 +155,29 @@ function BoardPage() {
 
   if (!ready) {
     return (
-      <div className="grid h-dvh w-screen place-items-center bg-background text-sm text-muted-foreground">
-        Loading board…
+      <div className="grid h-dvh w-screen place-items-center bg-background p-4 text-center">
+        <div className="max-w-sm space-y-3">
+          <div className="inline-block h-6 w-6 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+          <p className="text-sm font-medium text-foreground">
+            {loadTimedOut ? "Taking longer than usual to load…" : "Loading board…"}
+          </p>
+          {loadTimedOut && (
+            <div className="pt-2 flex flex-col gap-2">
+              <button
+                onClick={() => openBoard(boardId)}
+                className="rounded-lg bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground hover:bg-primary/90 transition"
+              >
+                Open Blank Canvas
+              </button>
+              <button
+                onClick={() => navigate({ to: "/", replace: true })}
+                className="rounded-lg border px-4 py-2 text-xs font-medium text-muted-foreground hover:bg-accent transition"
+              >
+                Back to Dashboard
+              </button>
+            </div>
+          )}
+        </div>
       </div>
     );
   }
@@ -120,7 +188,7 @@ function BoardPage() {
 
       <div
         className={cn(
-          "pointer-events-none absolute inset-x-0 top-0 flex justify-center p-2 sm:p-3 transition-opacity duration-300 z-30",
+          "pointer-events-none absolute inset-x-0 top-0 flex justify-center p-2 pt-7 sm:p-3 sm:pt-3 transition-opacity duration-300 z-30",
           isPresenting ? "opacity-0 pointer-events-none" : "opacity-100",
         )}
       >

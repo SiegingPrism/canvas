@@ -112,6 +112,7 @@ export type ShapeStroke = {
   w: number;
   h: number;
   rotation?: number;
+  vertices?: Point[];
 };
 
 export type TextObject = {

@@ -26,7 +26,7 @@ export const Route = createFileRoute("/api/vision")({
             apiKey: body.apiKey,
             provider: body.provider,
             baseURL: body.baseURL,
-            modelName: body.provider === "openai" ? "gpt-4o-mini" : "gemini-3.8-flash",
+            modelName: body.provider === "openai" ? "gpt-4o-mini" : "gemini-3.5-flash",
           });
 
           if (!modelConfig) {

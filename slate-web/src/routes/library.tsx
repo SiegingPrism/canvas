@@ -35,6 +35,9 @@ import {
   Cloud,
 } from "lucide-react";
 import { toast } from "sonner";
+import { cn } from "@/lib/utils";
+import { AuthDialog } from "@/components/auth/AuthDialog";
+import { useAuth } from "@/lib/supabase/authStore";
 import { semanticSearch } from "@/lib/ai/localRAG";
 
 export const Route = createFileRoute("/library")({
@@ -81,6 +84,8 @@ function Library() {
   const [renaming, setRenaming] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [newFolder, setNewFolder] = useState("");
+  const { user } = useAuth();
+  const [authOpen, setAuthOpen] = useState(false);
 
   const allTags = useMemo(() => {
     const s = new Set<string>();
@@ -158,14 +163,19 @@ function Library() {
               size="sm"
               variant="outline"
               onClick={async () => {
-                toast.info("Syncing boards with Supabase cloud...");
+                if (!user) {
+                  setAuthOpen(true);
+                  toast.info("Sign in to sync your boards privately to the cloud.");
+                  return;
+                }
+                toast.info("Syncing boards with your cloud account...");
                 await syncWithCloud();
                 toast.success("Board library synced with cloud!");
               }}
               className="gap-1.5"
             >
-              <Cloud className="h-4 w-4 text-emerald-500" />
-              <span>Cloud Sync</span>
+              <Cloud className={cn("h-4 w-4", user ? "text-emerald-500" : "text-blue-500")} />
+              <span>{user ? "Cloud Sync" : "Sign In & Sync"}</span>
             </Button>
             <Button size="sm" onClick={openNew}>
               <Plus className="h-4 w-4" /> New board
@@ -532,6 +542,8 @@ function Library() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      <AuthDialog open={authOpen} onOpenChange={setAuthOpen} />
     </div>
   );
 }

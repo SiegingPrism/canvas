@@ -544,16 +544,5 @@ if (typeof window !== "undefined") {
   window.addEventListener("pagehide", handleFlush);
   window.addEventListener("beforeunload", handleFlush);
   document.addEventListener("pause", handleFlush);
-
-  try {
-    const cap = (window as unknown as { Capacitor?: { Plugins?: { App?: { addListener: (evt: string, cb: (state: { isActive: boolean }) => void) => void } } } })?.Capacitor;
-    cap?.Plugins?.App?.addListener("appStateChange", (state) => {
-      if (!state.isActive) {
-        handleFlush();
-      }
-    });
-  } catch {
-    /* ignore */
-  }
 }
 

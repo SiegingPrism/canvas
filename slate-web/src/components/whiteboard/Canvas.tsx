@@ -60,9 +60,11 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
-import { AIEngine } from "@/lib/ai/aiEngine";
+import { AIEngine, aiErrorMessage } from "@/lib/ai/aiEngine";
 import { compileMathFunction } from "@/lib/whiteboard/safeMath";
-import type { MindMapNode } from "@/lib/ai/offlineAssistant";
+import type { MindMapNode } from "@/lib/ai/aiEngine";
+import { renderMathSolutionCard } from "@/lib/whiteboard/renderMathSolutionImage";
+import { formatLatexForDisplay } from "@/lib/whiteboard/mathTypesetting";
 
 function uid() {
   return Math.random().toString(36).slice(2, 10);
@@ -93,6 +95,7 @@ export function WhiteboardCanvas({
     selectedIds,
     autoSnapEnabled,
     addObject,
+    setObjects,
     updateObject,
     deleteObject,
     toggleTapeReveal,
@@ -178,6 +181,12 @@ export function WhiteboardCanvas({
   const touchMapRef = useRef<Map<number, { x: number; y: number }>>(new Map());
   const isPenActiveRef = useRef<boolean>(false);
   const wasPinchingRef = useRef<boolean>(false);
+  const eraserSessionRef = useRef<{
+    active: boolean;
+    erasedAny: boolean;
+    objects: CanvasObject[];
+    lastWorld: Point;
+  } | null>(null);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [editingText, setEditingText] = useState<{ id: string } | null>(null);
@@ -844,6 +853,35 @@ export function WhiteboardCanvas({
     return maxX >= viewLeft && minX <= viewRight && maxY >= viewTop && minY <= viewBottom;
   }
 
+  function distToSegmentSq(p: Point, a: Point, b: Point): number {
+    const l2 = (b.x - a.x) ** 2 + (b.y - a.y) ** 2;
+    if (l2 === 0) return (p.x - a.x) ** 2 + (p.y - a.y) ** 2;
+    let t = ((p.x - a.x) * (b.x - a.x) + (p.y - a.y) * (b.y - a.y)) / l2;
+    t = Math.max(0, Math.min(1, t));
+    return (p.x - (a.x + t * (b.x - a.x))) ** 2 + (p.y - (a.y + t * (b.y - a.y))) ** 2;
+  }
+
+  function splitStrokeAlongSegment(points: Point[], a: Point, b: Point, radius: number): Point[][] {
+    const segments: Point[][] = [];
+    let currentSeg: Point[] = [];
+    const rSq = radius * radius;
+    for (const pt of points) {
+      const dSq = distToSegmentSq(pt, a, b);
+      if (dSq >= rSq) {
+        currentSeg.push(pt);
+      } else {
+        if (currentSeg.length >= 2) {
+          segments.push(currentSeg);
+        }
+        currentSeg = [];
+      }
+    }
+    if (currentSeg.length >= 2) {
+      segments.push(currentSeg);
+    }
+    return segments;
+  }
+
   const redraw = useCallback(() => {
     const c = canvasRef.current;
     if (!c) return;
@@ -872,7 +910,10 @@ export function WhiteboardCanvas({
     const selectedSet = new Set(
       selectedIds.length > 0 ? selectedIds : selectedId ? [selectedId] : [],
     );
-    for (const obj of page.objects) {
+    const objectsToDraw = eraserSessionRef.current?.active
+      ? eraserSessionRef.current.objects
+      : page.objects;
+    for (const obj of objectsToDraw) {
       if (selectedSet.has(obj.id) || isObjectInViewport(obj, viewLeft, viewTop, viewRight, viewBottom)) {
         drawObject(ctx, obj, selectedSet.has(obj.id));
       }
@@ -1474,7 +1515,15 @@ export function WhiteboardCanvas({
     }
 
     if (s.shape === "rect") {
-      ctx.strokeRect(x, y, w, h);
+      if (s.rotation) {
+        ctx.save();
+        ctx.translate(x + w / 2, y + h / 2);
+        ctx.rotate(s.rotation);
+        ctx.strokeRect(-w / 2, -h / 2, w, h);
+        ctx.restore();
+      } else {
+        ctx.strokeRect(x, y, w, h);
+      }
     } else if (s.shape === "circle") {
       ctx.beginPath();
       ctx.ellipse(x + w / 2, y + h / 2, Math.abs(w / 2), Math.abs(h / 2), 0, 0, Math.PI * 2);
@@ -1482,12 +1531,27 @@ export function WhiteboardCanvas({
     } else if (s.shape === "ellipse") {
       drawEllipseShape(ctx, x, y, w, h);
     } else if (s.shape === "triangle") {
-      ctx.beginPath();
-      ctx.moveTo(x + w / 2, y);
-      ctx.lineTo(x, y + h);
-      ctx.lineTo(x + w, y + h);
-      ctx.closePath();
-      ctx.stroke();
+      if (s.vertices && s.vertices.length >= 3) {
+        ctx.beginPath();
+        const isRel = s.vertices.every(
+          (v) => v.x >= -0.5 && v.x <= 1.5 && v.y >= -0.5 && v.y <= 1.5
+        );
+        const vx = (v: Point) => (isRel ? x + v.x * w : v.x);
+        const vy = (v: Point) => (isRel ? y + v.y * h : v.y);
+        ctx.moveTo(vx(s.vertices[0]), vy(s.vertices[0]));
+        for (let i = 1; i < s.vertices.length; i++) {
+          ctx.lineTo(vx(s.vertices[i]), vy(s.vertices[i]));
+        }
+        ctx.closePath();
+        ctx.stroke();
+      } else {
+        ctx.beginPath();
+        ctx.moveTo(x + w / 2, y);
+        ctx.lineTo(x, y + h);
+        ctx.lineTo(x + w, y + h);
+        ctx.closePath();
+        ctx.stroke();
+      }
     } else if (s.shape === "right-triangle") {
       drawRightTriangleShape(ctx, x, y, w, h);
     } else if (s.shape === "diamond") {
@@ -1857,7 +1921,8 @@ export function WhiteboardCanvas({
     ctx.moveTo(startX, startY);
     ctx.lineTo(endX, endY);
     ctx.stroke();
-    const headLen = Math.max(14, s.size * 3.5);
+    const shaftLen = Math.hypot(s.w, s.h);
+    const headLen = Math.min(shaftLen * 0.35, Math.max(10, s.size * 3.5));
     drawArrowCap(ctx, startX, startY, endX, endY, headLen);
   }
 
@@ -1870,7 +1935,8 @@ export function WhiteboardCanvas({
     ctx.moveTo(startX, startY);
     ctx.lineTo(endX, endY);
     ctx.stroke();
-    const headLen = Math.max(14, s.size * 3.5);
+    const shaftLen = Math.hypot(s.w, s.h);
+    const headLen = Math.min(shaftLen * 0.35, Math.max(10, s.size * 3.5));
     drawArrowCap(ctx, startX, startY, endX, endY, headLen);
     drawArrowCap(ctx, endX, endY, startX, startY, headLen);
   }
@@ -3271,7 +3337,8 @@ export function WhiteboardCanvas({
 
   function drawFormula(ctx: CanvasRenderingContext2D, o: FormulaObject) {
     ctx.save();
-    ctx.fillStyle = o.color || "#ffffff";
+    // Clean card background
+    ctx.fillStyle = "#ffffff";
     ctx.shadowColor = "rgba(0,0,0,0.1)";
     ctx.shadowBlur = 8;
     ctx.shadowOffsetY = 2;
@@ -3279,32 +3346,28 @@ export function WhiteboardCanvas({
     ctx.fill();
     ctx.shadowColor = "transparent";
 
-    ctx.strokeStyle = "#8b5cf6";
+    const accentColor = o.color && o.color !== "#ffffff" ? o.color : "#8b5cf6";
+    ctx.strokeStyle = accentColor;
     ctx.lineWidth = 1.5;
     roundRect(ctx, o.x, o.y, o.w, o.h, 12);
     ctx.stroke();
 
-    ctx.fillStyle = "#8b5cf6";
-    ctx.font = "bold 10px system-ui, sans-serif";
-    ctx.fillText(o.label ? `MATH · ${o.label.toUpperCase()}` : "MATH FORMULA (LaTeX)", o.x + 12, o.y + 16);
+    // Top accent badge
+    ctx.fillStyle = accentColor;
+    roundRect(ctx, o.x + 10, o.y + 10, Math.min(o.w - 20, 180), 20, 10);
+    ctx.fill();
+
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "bold 9px system-ui, sans-serif";
+    ctx.fillText(o.label ? o.label.toUpperCase() : "MATH FORMULA", o.x + 18, o.y + 24);
 
     ctx.fillStyle = "#0f172a";
     ctx.font = "italic 16px 'Cambria Math', 'STIX Two Math', 'Times New Roman', serif";
-    const cleanFormula = o.latex
-      .replace(/\\frac\{([^}]+)\}\{([^}]+)\}/g, "($1 / $2)")
-      .replace(/\\sqrt\{([^}]+)\}/g, "√($1)")
-      .replace(/\\pm/g, "±")
-      .replace(/\\cdot/g, "·")
-      .replace(/\\pi/g, "π")
-      .replace(/\\int/g, "∫")
-      .replace(/\\infty/g, "∞")
-      .replace(/\\partial/g, "∂")
-      .replace(/\\sum/g, "∑")
-      .replace(/\\left|\\right/g, "");
+    const cleanFormula = formatLatexForDisplay(o.latex);
 
     const lines = wrapText(ctx, cleanFormula, o.w - 24);
     lines.forEach((l, idx) => {
-      ctx.fillText(l, o.x + 12, o.y + 44 + idx * 22);
+      ctx.fillText(l, o.x + 12, o.y + 54 + idx * 22);
     });
 
     ctx.fillStyle = "#94a3b8";
@@ -3455,19 +3518,28 @@ export function WhiteboardCanvas({
   }
 
   function drawSticky(ctx: CanvasRenderingContext2D, s: StickyNoteObject) {
+    ctx.save();
     ctx.fillStyle = s.color;
     ctx.shadowColor = "rgba(0,0,0,0.15)";
     ctx.shadowBlur = 8;
     ctx.shadowOffsetY = 2;
     ctx.fillRect(s.x, s.y, s.w, s.h);
     ctx.shadowColor = "transparent";
+
+    // Clip to bounds so long text never overflows sticky note
+    ctx.beginPath();
+    ctx.rect(s.x, s.y, s.w, s.h);
+    ctx.clip();
+
     ctx.fillStyle = "#1e293b";
-    ctx.font = `16px system-ui, sans-serif`;
+    ctx.font = `15px system-ui, sans-serif`;
     ctx.textBaseline = "top";
-    const lines = wrapText(ctx, s.text, s.w - 16);
+    const cleanedText = formatLatexForDisplay(s.text);
+    const lines = wrapText(ctx, cleanedText, s.w - 16);
     lines.forEach((line, i) => {
       ctx.fillText(line, s.x + 8, s.y + 8 + i * 20);
     });
+    ctx.restore();
   }
 
   const imageCache = useRef<Map<string, HTMLImageElement>>(new Map());
@@ -4291,43 +4363,53 @@ export function WhiteboardCanvas({
 
     // Eraser object
     if (tool === "eraser-object") {
+      eraserSessionRef.current = {
+        active: true,
+        erasedAny: false,
+        objects: [...page.objects],
+        lastWorld: w,
+      };
       const hit = hitTest(w);
       if (hit) {
-        pushHistory();
-        deleteObject(hit.id);
+        eraserSessionRef.current.objects = eraserSessionRef.current.objects.filter((o) => o.id !== hit.id);
+        eraserSessionRef.current.erasedAny = true;
+        redraw();
       }
       return;
     }
 
-    // Eraser pixel (tap erase)
+    // Eraser pixel (batch segment splitting without per-move save)
     if (tool === "eraser-pixel") {
-      const eraseR = size * 4;
-      let erasedAny = false;
+      const eraseR = Math.max(12, size * 2.5);
+      const initialObjs: CanvasObject[] = [];
+      let touched = false;
       for (const obj of page.objects) {
-        if ("points" in obj) {
-          if (obj.points.some((p) => Math.hypot(p.x - w.x, p.y - w.y) < eraseR)) {
-            if (!erasedAny) {
-              pushHistory();
-              erasedAny = true;
+        if ("points" in obj && Array.isArray((obj as any).points)) {
+          const segs = splitStrokeAlongSegment((obj as any).points, w, w, eraseR);
+          if (segs.length === 1 && segs[0].length === (obj as any).points.length) {
+            initialObjs.push(obj);
+          } else {
+            touched = true;
+            if (segs.length > 0) {
+              initialObjs.push({ ...obj, points: segs[0] } as CanvasObject);
+              for (let i = 1; i < segs.length; i++) {
+                initialObjs.push({ ...obj, id: uid(), points: segs[i] } as CanvasObject);
+              }
             }
-            deleteObject(obj.id);
           }
         } else {
-          const b = objectBounds(obj);
-          if (
-            w.x >= b.x - eraseR &&
-            w.x <= b.x + b.w + eraseR &&
-            w.y >= b.y - eraseR &&
-            w.y <= b.y + b.h + eraseR
-          ) {
-            if (!erasedAny) {
-              pushHistory();
-              erasedAny = true;
-            }
-            deleteObject(obj.id);
-          }
+          // Never delete whole non-stroke elements (images, text, cards, shapes) with pixel eraser
+          initialObjs.push(obj);
         }
       }
+      eraserSessionRef.current = {
+        active: true,
+        erasedAny: touched,
+        objects: initialObjs,
+        lastWorld: w,
+      };
+      if (touched) redraw();
+      return;
     }
 
     // Text tool
@@ -4469,9 +4551,74 @@ export function WhiteboardCanvas({
       return;
     }
 
+    if (tool === "eraser-pixel" && eraserSessionRef.current?.active) {
+      const session = eraserSessionRef.current;
+      const eraseR = Math.max(12, size * 2.5);
+      const nextObjs: CanvasObject[] = [];
+      let touched = false;
+      for (const obj of session.objects) {
+        if ("points" in obj && Array.isArray((obj as any).points)) {
+          const segs = splitStrokeAlongSegment((obj as any).points, session.lastWorld, w, eraseR);
+          if (segs.length === 1 && segs[0].length === (obj as any).points.length) {
+            nextObjs.push(obj);
+          } else {
+            touched = true;
+            if (segs.length > 0) {
+              nextObjs.push({ ...obj, points: segs[0] } as CanvasObject);
+              for (let i = 1; i < segs.length; i++) {
+                nextObjs.push({ ...obj, id: uid(), points: segs[i] } as CanvasObject);
+              }
+            }
+          }
+        } else {
+          // Never delete whole non-stroke elements with pixel eraser
+          nextObjs.push(obj);
+        }
+      }
+      session.objects = nextObjs;
+      if (touched) {
+        session.erasedAny = true;
+        redraw();
+      }
+      session.lastWorld = w;
+      drawLive();
+      return;
+    }
+
+    if (tool === "eraser-object" && eraserSessionRef.current?.active) {
+      const session = eraserSessionRef.current;
+      const hit = hitTest(w);
+      if (hit) {
+        const prevLen = session.objects.length;
+        session.objects = session.objects.filter((o) => o.id !== hit.id);
+        if (session.objects.length < prevLen) {
+          session.erasedAny = true;
+          redraw();
+        }
+      }
+      session.lastWorld = w;
+      drawLive();
+      return;
+    }
+
     if (drawingRef.current) {
       const curDraw = drawingRef.current;
-      curDraw.points.push(ptWithMeta);
+      const coalescedEvents = (e.nativeEvent as any)?.getCoalescedEvents?.() as PointerEvent[] | undefined;
+      if (coalescedEvents && coalescedEvents.length > 0) {
+        for (const cev of coalescedEvents) {
+          const csx = cev.clientX - rect.left;
+          const csy = cev.clientY - rect.top;
+          const cw = toWorld(csx, csy);
+          curDraw.points.push({
+            x: cw.x,
+            y: cw.y,
+            p: cev.pressure > 0 ? cev.pressure : (e.pressure || 0.5),
+            t: Date.now(),
+          });
+        }
+      } else {
+        curDraw.points.push(ptWithMeta);
+      }
       curDraw.lastMoveAt = Date.now();
 
       // Hold-to-snap detection
@@ -4498,26 +4645,7 @@ export function WhiteboardCanvas({
         }, 400);
       }
 
-      if (tool === "eraser-pixel") {
-        const eraseR = size * 4;
-        for (const obj of page.objects) {
-          if ("points" in obj) {
-            const hit = obj.points.some((p) => Math.hypot(p.x - w.x, p.y - w.y) < eraseR);
-            if (hit) deleteObject(obj.id);
-          } else {
-            const b = objectBounds(obj);
-            const hit =
-              w.x >= b.x - eraseR &&
-              w.x <= b.x + b.w + eraseR &&
-              w.y >= b.y - eraseR &&
-              w.y <= b.y + b.h + eraseR;
-            if (hit) deleteObject(obj.id);
-          }
-        }
-      } else if (tool === "eraser-object") {
-        const hit = hitTest(w);
-        if (hit) deleteObject(hit.id);
-      } else if (tool === "laser") {
+      if (tool === "laser") {
         laserRef.current.push(ptWithMeta);
         const maxAge = 800;
         const drop =
@@ -4671,16 +4799,22 @@ export function WhiteboardCanvas({
       return;
     }
 
+    if ((tool === "eraser-pixel" || tool === "eraser-object") && eraserSessionRef.current) {
+      const session = eraserSessionRef.current;
+      eraserSessionRef.current = null;
+      clearOverlay();
+      if (session.erasedAny) {
+        setObjects(session.objects);
+        pushHistory();
+      }
+      return;
+    }
+
     if (drawingRef.current) {
       const d = drawingRef.current;
       if (d.holdTimer) clearTimeout(d.holdTimer);
       drawingRef.current = null;
       clearOverlay();
-
-      if (tool === "eraser-pixel" || tool === "eraser-object") {
-        pushHistory();
-        return;
-      }
 
       if (tool === "laser") {
         fadeLaser();
@@ -4844,6 +4978,21 @@ export function WhiteboardCanvas({
       return;
     }
 
+    // Live Eraser Reticle
+    if (eraserSessionRef.current?.active) {
+      const pos = eraserSessionRef.current.lastWorld;
+      const eraseR = Math.max(12, size * 2.5);
+      ctx.strokeStyle = "#94a3b8";
+      ctx.lineWidth = 1.5 / camera.zoom;
+      ctx.fillStyle = "rgba(148, 163, 184, 0.2)";
+      ctx.beginPath();
+      ctx.arc(pos.x, pos.y, eraseR, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+      return;
+    }
+
     if (!drawingRef.current) return ctx.restore();
 
     // If shape snapped live preview
@@ -4961,7 +5110,15 @@ export function WhiteboardCanvas({
     "#ec4899",
   ];
 
-  function exportSelectedRegionAsImage(targetIds: string[]): string | null {
+  function exportSelectedRegionDetails(targetIds: string[]): {
+    dataUrl: string;
+    scale: number;
+    pad: number;
+    minX: number;
+    minY: number;
+    w: number;
+    h: number;
+  } | null {
     const selectedObjects = page.objects.filter((o) => targetIds.includes(o.id));
     if (selectedObjects.length === 0) return null;
 
@@ -4977,25 +5134,44 @@ export function WhiteboardCanvas({
       maxY = Math.max(maxY, b.y + b.h);
     }
 
-    const w = Math.max(50, maxX - minX);
-    const h = Math.max(50, maxY - minY);
-    const pad = 20;
+    const w = Math.max(60, maxX - minX);
+    const h = Math.max(60, maxY - minY);
+    const pad = 24;
+
+    const rawW = w + pad * 2;
+    const rawH = h + pad * 2;
+    const maxDim = Math.max(rawW, rawH);
+    const scale = Math.min(4, Math.max(1, 1024 / maxDim));
 
     const offscreen = document.createElement("canvas");
-    offscreen.width = w + pad * 2;
-    offscreen.height = h + pad * 2;
+    offscreen.width = Math.round(rawW * scale);
+    offscreen.height = Math.round(rawH * scale);
     const offCtx = offscreen.getContext("2d");
     if (!offCtx) return null;
 
     offCtx.fillStyle = "#ffffff";
     offCtx.fillRect(0, 0, offscreen.width, offscreen.height);
+    offCtx.scale(scale, scale);
     offCtx.translate(pad - minX, pad - minY);
 
     for (const obj of selectedObjects) {
       drawObject(offCtx, obj, false);
     }
 
-    return offscreen.toDataURL("image/png");
+    return {
+      dataUrl: offscreen.toDataURL("image/png"),
+      scale,
+      pad,
+      minX,
+      minY,
+      w,
+      h,
+    };
+  }
+
+  function exportSelectedRegionAsImage(targetIds: string[]): string | null {
+    const details = exportSelectedRegionDetails(targetIds);
+    return details?.dataUrl || null;
   }
 
   async function handleConvertHandwritingToText() {
@@ -5003,32 +5179,35 @@ export function WhiteboardCanvas({
     if (targetIds.length === 0) return;
     const img = exportSelectedRegionAsImage(targetIds);
     toast.info("Transcribing handwriting with AI...");
-    const text = await AIEngine.transcribeHandwriting(img || undefined);
+    try {
+      const text = await AIEngine.transcribeHandwriting(img || undefined);
 
-    let cx = 400;
-    let cy = 300;
-    const selectedObjects = page.objects.filter((o) => targetIds.includes(o.id));
-    if (selectedObjects.length > 0) {
-      const b = objectBounds(selectedObjects[0]);
-      cx = b.x;
-      cy = b.y;
+      let cx = 400;
+      let cy = 300;
+      const selectedObjects = page.objects.filter((o) => targetIds.includes(o.id));
+      if (selectedObjects.length > 0) {
+        const b = objectBounds(selectedObjects[0]);
+        cx = b.x;
+        cy = b.y;
+      }
+
+      deleteSelected();
+      addObject({
+        id: uid(),
+        kind: "text",
+        x: cx,
+        y: cy,
+        w: 260,
+        h: 90,
+        text: text.trim(),
+        color: "#0f172a",
+        fontSize: 18,
+      });
+      pushHistory();
+      toast.success("Converted to editable text!");
+    } catch (err) {
+      toast.error(`${aiErrorMessage(err)} Your ink was kept.`);
     }
-
-    pushHistory();
-    deleteSelected();
-
-    addObject({
-      id: uid(),
-      kind: "text",
-      x: cx,
-      y: cy,
-      w: 260,
-      h: 90,
-      text,
-      color: "#0f172a",
-      fontSize: 18,
-    });
-    toast.success("Converted to editable text!");
   }
 
   async function handleConvertMath() {
@@ -5036,30 +5215,33 @@ export function WhiteboardCanvas({
     if (targetIds.length === 0) return;
     const img = exportSelectedRegionAsImage(targetIds);
     toast.info("Recognizing math formula...");
-    const latex = await AIEngine.recognizeMath(img || undefined);
+    try {
+      const latex = await AIEngine.recognizeMath(img || undefined);
 
-    let cx = 400;
-    let cy = 300;
-    const selectedObjects = page.objects.filter((o) => targetIds.includes(o.id));
-    if (selectedObjects.length > 0) {
-      const b = objectBounds(selectedObjects[0]);
-      cx = b.x;
-      cy = b.y;
+      let cx = 400;
+      let cy = 300;
+      const selectedObjects = page.objects.filter((o) => targetIds.includes(o.id));
+      if (selectedObjects.length > 0) {
+        const b = objectBounds(selectedObjects[0]);
+        cx = b.x;
+        cy = b.y;
+      }
+
+      deleteSelected();
+      addObject({
+        id: uid(),
+        kind: "formula",
+        x: cx,
+        y: cy,
+        w: 280,
+        h: 110,
+        latex: latex.trim(),
+      });
+      pushHistory();
+      toast.success("Converted to math formula!");
+    } catch (err) {
+      toast.error(`${aiErrorMessage(err)} Your ink was kept.`);
     }
-
-    pushHistory();
-    deleteSelected();
-
-    addObject({
-      id: uid(),
-      kind: "formula",
-      x: cx,
-      y: cy,
-      w: 280,
-      h: 110,
-      latex,
-    });
-    toast.success("Converted to math formula!");
   }
 
   async function handleSolveAndPlotMath() {
@@ -5075,76 +5257,85 @@ export function WhiteboardCanvas({
 
     const img = exportSelectedRegionAsImage(targetIds);
     toast.info("Solving math & computing 2D plot...");
-    const res = await AIEngine.solveMath(textHint || undefined, img || undefined);
+    try {
+      const res = await AIEngine.solveMath(textHint || undefined, img || undefined);
+      if (!res || !res.solution) {
+        toast.error("Could not solve math formula. Ink was kept intact.");
+        return;
+      }
 
-    let cx = 400;
-    let cy = 300;
-    let maxW = 280;
-    if (selectedObjects.length > 0) {
-      const b = objectBounds(selectedObjects[0]);
-      cx = b.x;
-      cy = b.y;
-      maxW = Math.max(280, b.w);
-    }
+      const b = selectedObjects.reduce(
+        (acc, obj) => {
+          const ob = objectBounds(obj);
+          return {
+            minX: Math.min(acc.minX, ob.x),
+            minY: Math.min(acc.minY, ob.y),
+            maxX: Math.max(acc.maxX, ob.x + ob.w),
+            maxY: Math.max(acc.maxY, ob.y + ob.h),
+          };
+        },
+        { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity },
+      );
 
-    pushHistory();
-    deleteSelected();
+      // Keep user's handwriting intact! Place answer directly adjacent to the written equation
+      const screenW = typeof window !== "undefined" ? window.innerWidth : 800;
+      const placeRight = isFinite(b.maxX) ? b.maxX + 24 : 400;
+      const placeDown = isFinite(b.maxY) ? b.maxY + 20 : 300;
+      const rightInScreen = (placeRight - camera.x) * camera.zoom;
 
-    // 1. Clean formula card
-    const formulaId = uid();
-    addObject({
-      id: formulaId,
-      kind: "formula",
-      x: cx,
-      y: cy,
-      w: Math.max(280, maxW),
-      h: 110,
-      latex: res.latex,
-      label: res.title || "SOLVED",
-    });
+      const insertX = rightInScreen > screenW - 200 ? (isFinite(b.minX) ? b.minX : 400) : placeRight;
+      const insertY = rightInScreen > screenW - 200 ? placeDown : (isFinite(b.minY) ? b.minY : 300);
 
-    // 2. Step-by-step solution card directly beneath
-    const stepsText =
-      `📐 SOLUTION: ${res.solution}\n\n` +
-      (res.steps?.length
-        ? res.steps.map((s) => `• ${s}`).join("\n")
-        : "Verified algebraic solution.");
-    const solutionCardId = uid();
-    addObject({
-      id: solutionCardId,
-      kind: "sticky",
-      x: cx,
-      y: cy + 124,
-      w: Math.max(280, maxW),
-      h: Math.min(260, Math.max(140, (res.steps?.length || 2) * 28 + 60)),
-      text: stepsText,
-      color: "#fef9c3",
-    });
-
-    // 3. Interactive 2D GraphObject right next to the formula if plottable
-    if (res.graphableFn) {
-      const graphId = uid();
-      addObject({
-        id: graphId,
-        kind: "graph",
-        x: cx + Math.max(300, maxW + 20),
-        y: cy,
-        w: 320,
-        h: 234,
-        fn: res.graphableFn,
-        xMin: res.xRange?.[0] ?? -6,
-        xMax: res.xRange?.[1] ?? 6,
-        yMin: res.yRange?.[0] ?? -5,
-        yMax: res.yRange?.[1] ?? 8,
-        color: "#38bdf8",
-        title: res.title || `Plot: ${res.latex}`,
+      // Render pedagogical, high-resolution step-by-step solution card image
+      const solutionCard = renderMathSolutionCard({
+        problemLatex: textHint || res.latex || res.title || "Math Equation",
+        solution: res.solution,
+        steps: res.steps || [],
+        title: res.title,
+        graphableFn: res.graphableFn,
+        xRange: res.xRange,
+        yRange: res.yRange,
       });
-      toast.success("Solved, explained & 2D graph plotted on canvas!");
-    } else {
-      toast.success("Math solved with step-by-step reasoning!");
-    }
 
-    setSelected(formulaId);
+      const solutionImageId = uid();
+      addObject({
+        id: solutionImageId,
+        kind: "image",
+        src: solutionCard.dataUrl,
+        x: insertX,
+        y: insertY,
+        w: solutionCard.width,
+        h: solutionCard.height,
+      });
+
+      // Interactive 2D GraphObject right next to the solution card if plottable
+      if (res.graphableFn) {
+        const graphId = uid();
+        addObject({
+          id: graphId,
+          kind: "graph",
+          x: insertX + solutionCard.width + 24,
+          y: insertY,
+          w: 320,
+          h: 234,
+          fn: res.graphableFn,
+          xMin: res.xRange?.[0] ?? -6,
+          xMax: res.xRange?.[1] ?? 6,
+          yMin: res.yRange?.[0] ?? -5,
+          yMax: res.yRange?.[1] ?? 8,
+          color: "#38bdf8",
+          title: res.title || `Plot: ${res.latex}`,
+        });
+        toast.success("Solved, explained & 2D graph plotted on canvas!");
+      } else {
+        toast.success("Math solved with step-by-step reasoning!");
+      }
+
+      pushHistory();
+      setSelected(solutionImageId);
+    } catch (err) {
+      toast.error(`${aiErrorMessage(err)} Your ink was kept.`);
+    }
   }
 
   async function handleSolveBoardMath() {
@@ -5235,8 +5426,6 @@ export function WhiteboardCanvas({
         return;
       }
 
-      pushHistory();
-
       // Keep user's handwriting intact! Place answer directly next to the written equation
       const placeRight = b.maxX + 24;
       const placeDown = b.maxY + 20;
@@ -5247,65 +5436,55 @@ export function WhiteboardCanvas({
       const insertX = rightInScreen > screenW - 200 ? b.minX : placeRight;
       const insertY = rightInScreen > screenW - 200 ? placeDown : b.minY;
 
-      // 1. Math Formula Answer badge
-      const formulaId = uid();
-      addObject({
-        id: formulaId,
-        kind: "formula",
-        x: insertX,
-        y: insertY,
-        w: Math.max(180, res.solution.length * 12 + 60),
-        h: 70,
-        latex: `= ${res.solution}`,
-        label: `SOLVED: ${res.solution}`,
-        color: "#8b5cf6",
+      // Render pedagogical, high-resolution step-by-step solution card image
+      const solutionCard = renderMathSolutionCard({
+        problemLatex: textHint || res.latex || res.title || "Math Equation",
+        solution: res.solution,
+        steps: res.steps || [],
+        title: res.title,
+        graphableFn: res.graphableFn,
+        xRange: res.xRange,
+        yRange: res.yRange,
       });
 
-      // 2. If steps exist, add sticky note solution card below
-      if (res.steps && res.steps.length > 0) {
-        const solutionCardId = uid();
-        const stepsText =
-          `📐 MATH SOLUTION\nResult: ${res.solution}\n\n` +
-          res.steps.map((s) => `• ${s}`).join("\n");
+      const solutionImageId = uid();
+      addObject({
+        id: solutionImageId,
+        kind: "image",
+        src: solutionCard.dataUrl,
+        x: insertX,
+        y: insertY,
+        w: solutionCard.width,
+        h: solutionCard.height,
+      });
 
-        addObject({
-          id: solutionCardId,
-          kind: "sticky",
-          x: insertX,
-          y: insertY + 82,
-          w: Math.max(220, Math.min(320, (res.title || "").length * 8 + 120)),
-          h: Math.min(240, Math.max(120, res.steps.length * 24 + 60)),
-          text: stepsText,
-          color: "#fef9c3",
-        });
-      }
-
-      // 3. If plottable graph, add graph alongside
+      // If plottable interactive graph, add graph alongside
       if (res.graphableFn) {
         const graphId = uid();
         addObject({
           id: graphId,
           kind: "graph",
-          x: insertX + 240,
+          x: insertX + solutionCard.width + 24,
           y: insertY,
-          w: 300,
-          h: 220,
+          w: 320,
+          h: 234,
           fn: res.graphableFn,
-          xMin: res.xRange?.[0] ?? -5,
-          xMax: res.xRange?.[1] ?? 5,
+          xMin: res.xRange?.[0] ?? -6,
+          xMax: res.xRange?.[1] ?? 6,
           yMin: res.yRange?.[0] ?? -5,
-          yMax: res.yRange?.[1] ?? 5,
+          yMax: res.yRange?.[1] ?? 8,
           color: "#06b6d4",
           title: res.title || `Plot: ${res.latex}`,
         });
       }
 
-      setSelected(formulaId);
-      toast.success(`Calculated: ${res.solution}`);
+      pushHistory();
+      setSelected(solutionImageId);
+      toast.success(`Calculated: ${formatLatexForDisplay(res.solution)}`);
     } catch (err) {
       toast.dismiss(solveToastId);
       console.error(err);
-      toast.error("Failed to solve handwritten math.");
+      toast.error(aiErrorMessage(err, "Failed to solve handwritten math."));
     }
   }
 
@@ -5324,7 +5503,6 @@ export function WhiteboardCanvas({
       return;
     }
 
-    pushHistory();
     let beautifiedCount = 0;
 
     for (const stroke of strokeObjs) {
@@ -5340,6 +5518,7 @@ export function WhiteboardCanvas({
     }
 
     if (beautifiedCount > 0) {
+      pushHistory();
       toast.success(`Beautified ${beautifiedCount} sketch(es) into geometric shapes!`);
     } else {
       // Fallback: smooth to circle or rectangle
@@ -5357,6 +5536,7 @@ export function WhiteboardCanvas({
         w: b.w,
         h: b.h,
       });
+      pushHistory();
       toast.success("Smoothed and converted into geometric vector shape!");
     }
   }
@@ -5377,22 +5557,22 @@ export function WhiteboardCanvas({
       bounds = objectBounds(selectedObjects[0]);
     }
 
-    if (!topic.trim()) {
-      const img = exportSelectedRegionAsImage(targetIds);
-      if (img) {
-        toast.info("Analyzing selected drawing with AI...");
-        topic = await AIEngine.transcribeHandwriting(img);
+    let tree: MindMapNode;
+    try {
+      if (!topic.trim()) {
+        const img = exportSelectedRegionAsImage(targetIds);
+        if (img) {
+          toast.info("Reading the selected handwriting...");
+          topic = await AIEngine.transcribeHandwriting(img);
+        }
       }
+      toast.info("Generating mind map...");
+      tree = await AIEngine.generateMindMap(topic.trim(), bounds.x + bounds.w + 240, bounds.y);
+    } catch (err) {
+      toast.error(aiErrorMessage(err, "Couldn't generate a mind map."));
+      return;
     }
 
-    toast.info("Generating connected concept mind map...");
-    const tree = await AIEngine.generateMindMap(
-      topic.trim() || "Concept Architecture",
-      bounds.x + bounds.w + 240,
-      bounds.y,
-    );
-
-    pushHistory();
     function addTreeNodes(n: MindMapNode) {
       addObject({
         id: n.id,
@@ -5412,6 +5592,7 @@ export function WhiteboardCanvas({
     }
 
     addTreeNodes(tree);
+    pushHistory();
     toast.success("Concept mind map branches placed on canvas!");
   }
 
@@ -5431,18 +5612,22 @@ export function WhiteboardCanvas({
       bounds = objectBounds(selectedObjects[0]);
     }
 
-    if (!content.trim()) {
-      const img = exportSelectedRegionAsImage(targetIds);
-      if (img) {
-        toast.info("Extracting concept terms with AI...");
-        content = await AIEngine.transcribeHandwriting(img);
+    let cards: Awaited<ReturnType<typeof AIEngine.generateFlashcards>>;
+    try {
+      if (!content.trim()) {
+        const img = exportSelectedRegionAsImage(targetIds);
+        if (img) {
+          toast.info("Reading the selected handwriting...");
+          content = await AIEngine.transcribeHandwriting(img);
+        }
       }
+      toast.info("Generating flashcards...");
+      cards = await AIEngine.generateFlashcards(content.trim());
+    } catch (err) {
+      toast.error(aiErrorMessage(err, "Couldn't generate flashcards."));
+      return;
     }
 
-    toast.info("Generating spaced-repetition flashcards...");
-    const cards = await AIEngine.generateFlashcards(content.trim() || "Whiteboard Concept");
-
-    pushHistory();
     cards.slice(0, 3).forEach((card, idx) => {
       addObject({
         id: uid(),
@@ -5456,6 +5641,7 @@ export function WhiteboardCanvas({
         flipped: false,
       });
     });
+    pushHistory();
 
     toast.success(`Generated ${Math.min(3, cards.length)} flashcard(s) on canvas!`);
   }
@@ -5463,37 +5649,45 @@ export function WhiteboardCanvas({
   async function handleConvertDiagram() {
     const targetIds = selectedIds.length > 0 ? selectedIds : selectedId ? [selectedId] : [];
     if (targetIds.length === 0) return;
-    const img = exportSelectedRegionAsImage(targetIds);
+    const details = exportSelectedRegionDetails(targetIds);
+    if (!details) return;
+
     toast.info("Converting diagram to flowchart...");
 
-    let cx = 350;
-    let cy = 250;
-    const selectedObjects = page.objects.filter((o) => targetIds.includes(o.id));
-    if (selectedObjects.length > 0) {
-      const b = objectBounds(selectedObjects[0]);
-      cx = b.x;
-      cy = b.y;
-    }
+    try {
+      const nodes = await AIEngine.convertDiagram(
+        details.dataUrl,
+        "Process Flow",
+        details.minX,
+        details.minY,
+        details.scale,
+        details.pad,
+      );
+      if (!nodes || nodes.length === 0) {
+        toast.error("Could not convert diagram. Ink was kept intact.");
+        return;
+      }
 
-    const nodes = await AIEngine.convertDiagram(img || undefined, "Process Flow", cx, cy);
+      deleteSelected();
 
-    pushHistory();
-    deleteSelected();
-
-    nodes.forEach((n) => {
-      addObject({
-        id: n.id,
-        kind: "diagram-node",
-        x: n.x,
-        y: n.y,
-        w: n.w,
-        h: n.h,
-        nodeType: n.type,
-        label: n.label,
-        connectedTo: n.connectedTo,
+      nodes.forEach((n) => {
+        addObject({
+          id: n.id,
+          kind: "diagram-node",
+          x: n.x,
+          y: n.y,
+          w: n.w,
+          h: n.h,
+          nodeType: n.type,
+          label: n.label,
+          connectedTo: n.connectedTo,
+        });
       });
-    });
-    toast.success("Converted to structured flowchart!");
+      pushHistory();
+      toast.success("Converted to structured flowchart!");
+    } catch (err) {
+      toast.error(`${aiErrorMessage(err)} Your ink was kept.`);
+    }
   }
 
   return (
@@ -5925,8 +6119,8 @@ export function WhiteboardCanvas({
 
           <button
             onClick={() => {
-              pushHistory();
               duplicateSelected();
+              pushHistory();
             }}
             title="Duplicate"
             className="flex h-8 w-8 items-center justify-center rounded-full hover:bg-accent text-foreground transition"
@@ -5947,8 +6141,8 @@ export function WhiteboardCanvas({
                   <button
                     key={c}
                     onClick={() => {
-                      pushHistory();
                       recolorSelected(c);
+                      pushHistory();
                       setRecolorPickerOpen(false);
                     }}
                     className="h-6 w-6 rounded-full border border-border"
@@ -5960,8 +6154,8 @@ export function WhiteboardCanvas({
           </div>
           <button
             onClick={() => {
-              pushHistory();
               deleteSelected();
+              pushHistory();
             }}
             title="Delete"
             className="flex h-8 w-8 items-center justify-center rounded-full hover:bg-destructive/10 text-destructive transition"
